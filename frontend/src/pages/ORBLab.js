@@ -61,7 +61,7 @@ export default function ORBLab({ onRunComplete, onSweepComplete }) {
   const [symbol, setSymbol]         = useState('SPY');
   const [customSymbol, setCustomSym] = useState('');
   const [timeframe, setTimeframe]   = useState('1m');
-  const [dateFrom, setDateFrom]     = useState('2026-04-01');
+  const [dateFrom, setDateFrom]     = useState('2022-03-15');
   const [dateTo, setDateTo]         = useState('2026-07-17');
 
   const [orWindowMin, setOrWindowMin] = useState(15);
@@ -216,9 +216,11 @@ export default function ORBLab({ onRunComplete, onSweepComplete }) {
         <span style={{ color: 'var(--text3)', fontSize: 11, fontFamily: 'var(--mono)' }}>
           Build the Opening Range from the first N minutes of the session, then trade the first breakout beyond it.
           Results split into in-sample (first 70% of days) and out-of-sample (last 30%). Regime filters use the PRIOR
-          day's daily chart — no lookahead. Always flat by end of day. Default preset here is the 2026-07-20 study's
-          winner: 15-min OR traded on 1-min bars, LONG/CLOSE/OR_FRAC(1.5)/EOD, cutoff noon, ADX≥25 — both SPY and QQQ
-          clear a realistic 5bp round-trip cost, in-sample and out-of-sample.
+          day's daily chart — no lookahead. Always flat by end of day. Default preset here is the settled live-trading
+          plan (SPY/MES, 15-min OR traded on 1-min bars, LONG/CLOSE/OR_FRAC(1.5)/EOD, cutoff noon, ADX≥25), starting
+          2022-03-15 — the 2021-2022 rate-hike selloff is deliberately excluded from the default window (it drove a
+          47% real-money drawdown vs. ~9% afterward); the plan is to watch for major regime shifts yourself and pause
+          the bot rather than rely on an automated filter, which empirically hurt more than it helped here.
         </span>
       </div>
 
@@ -263,7 +265,7 @@ export default function ORBLab({ onRunComplete, onSweepComplete }) {
         <div style={{ color: 'var(--text3)', fontSize: 11, fontFamily: 'var(--mono)', marginTop: 4 }}>
           {orWindowMin}min OR = {orBars} × {timeframe} bar{orBars === 1 ? '' : 's'}.
           {timeframe === '5m' && ' ⚠ Yahoo only serves ~60 days of 5m bars.'}
-          {timeframe === '1m' && ' ⚠ On a cold cache, a multi-year 1-min fetch can take 1-2 minutes — Heroku kills requests after 30s, so keep the first run on a new symbol/range to a few months, then widen once it\'s cached.'}
+          {timeframe === '1m' && ' ⚠ This default range (post-Mar-2022, the validated live-trading window) is pre-cached on the deployed app — but if you change the symbol or widen the range on a cold cache, a multi-year 1-min fetch can take 1-2 minutes and Heroku kills requests after 30s. If that happens, fetch a smaller range first, then widen once it\'s cached.'}
         </div>
       </div>
 
