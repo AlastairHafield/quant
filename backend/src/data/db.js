@@ -126,6 +126,19 @@ function initSchema() {
       PRIMARY KEY (symbol, utc_datetime)
     );
 
+    CREATE TABLE IF NOT EXISTS bars_1m (
+      symbol TEXT,
+      utc_datetime TEXT,
+      date TEXT,
+      ny_time INTEGER,
+      open REAL,
+      high REAL,
+      low REAL,
+      close REAL,
+      volume REAL,
+      PRIMARY KEY (symbol, utc_datetime)
+    );
+
     CREATE TABLE IF NOT EXISTS mr_backtest_runs (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
       run_at TEXT DEFAULT (datetime('now')),
@@ -206,6 +219,56 @@ function initSchema() {
       return_pct REAL,
       rr_ratio REAL,
       pnl_dollars REAL
+    );
+
+    CREATE TABLE IF NOT EXISTS orb_backtest_runs (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      run_at TEXT DEFAULT (datetime('now')),
+      symbol TEXT,
+      date_from TEXT,
+      date_to TEXT,
+      timeframe TEXT,
+      sweep_id TEXT,
+      total_trades INTEGER,
+      win_rate REAL,
+      total_return_pct REAL,
+      avg_trade_return_pct REAL,
+      sharpe REAL,
+      profit_factor REAL,
+      max_drawdown_pct REAL,
+      is_trades INTEGER,
+      is_win_rate REAL,
+      is_return_pct REAL,
+      is_sharpe REAL,
+      is_profit_factor REAL,
+      oos_trades INTEGER,
+      oos_win_rate REAL,
+      oos_return_pct REAL,
+      oos_sharpe REAL,
+      oos_profit_factor REAL,
+      params TEXT,
+      metrics TEXT
+    );
+
+    CREATE TABLE IF NOT EXISTS orb_backtest_trades (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      run_id INTEGER REFERENCES orb_backtest_runs(id),
+      trade_date TEXT,
+      entry_time INTEGER,
+      signal TEXT,
+      entry_price REAL,
+      target_price REAL,
+      stop_price REAL,
+      exit_price REAL,
+      exit_result TEXT,
+      bars_held INTEGER,
+      or_range_pct REAL,
+      gap_pct REAL,
+      gross_return_pct REAL,
+      return_pct REAL,
+      pnl_dollars REAL,
+      regime_trend TEXT,
+      sample TEXT
     );
   `);
 }
@@ -384,6 +447,26 @@ export function getBars5m(symbol, from, to) {
   `).all(symbol, from, to);
 }
 
+// 1m bar cache (Alpaca — free/Basic IEX feed serves ~5yr of 1-minute history)
+export function upsertBars1m(rows) {
+  const db = getDb();
+  const insert = db.prepare(`
+    INSERT OR REPLACE INTO bars_1m
+      (symbol, utc_datetime, date, ny_time, open, high, low, close, volume)
+    VALUES
+      (@symbol, @utc_datetime, @date, @ny_time, @open, @high, @low, @close, @volume)
+  `);
+  db.transaction((rows) => rows.forEach(r => insert.run(r)))(rows);
+}
+
+export function getBars1m(symbol, from, to) {
+  return getDb().prepare(`
+    SELECT * FROM bars_1m
+    WHERE symbol = ? AND date >= ? AND date <= ?
+    ORDER BY utc_datetime ASC
+  `).all(symbol, from, to);
+}
+
 // Mean-reversion backtest
 export function saveMRRun(run) {
   const result = getDb().prepare(`
@@ -426,6 +509,52 @@ export function getMRRun(runId) {
 
 export function getMRTrades(runId) {
   return getDb().prepare('SELECT * FROM mr_backtest_trades WHERE run_id = ? ORDER BY trade_date ASC, entry_time ASC').all(runId);
+}
+
+// Opening-Range Breakout backtest
+export function saveORBRun(run) {
+  const result = getDb().prepare(`
+    INSERT INTO orb_backtest_runs
+      (symbol, date_from, date_to, timeframe, sweep_id,
+       total_trades, win_rate, total_return_pct, avg_trade_return_pct, sharpe, profit_factor, max_drawdown_pct,
+       is_trades, is_win_rate, is_return_pct, is_sharpe, is_profit_factor,
+       oos_trades, oos_win_rate, oos_return_pct, oos_sharpe, oos_profit_factor,
+       params, metrics)
+    VALUES
+      (@symbol, @date_from, @date_to, @timeframe, @sweep_id,
+       @total_trades, @win_rate, @total_return_pct, @avg_trade_return_pct, @sharpe, @profit_factor, @max_drawdown_pct,
+       @is_trades, @is_win_rate, @is_return_pct, @is_sharpe, @is_profit_factor,
+       @oos_trades, @oos_win_rate, @oos_return_pct, @oos_sharpe, @oos_profit_factor,
+       @params, @metrics)
+  `).run(run);
+  return result.lastInsertRowid;
+}
+
+export function saveORBTrades(trades) {
+  const db = getDb();
+  const insert = db.prepare(`
+    INSERT INTO orb_backtest_trades
+      (run_id, trade_date, entry_time, signal, entry_price, target_price, stop_price,
+       exit_price, exit_result, bars_held, or_range_pct, gap_pct, gross_return_pct,
+       return_pct, pnl_dollars, regime_trend, sample)
+    VALUES
+      (@run_id, @trade_date, @entry_time, @signal, @entry_price, @target_price, @stop_price,
+       @exit_price, @exit_result, @bars_held, @or_range_pct, @gap_pct, @gross_return_pct,
+       @return_pct, @pnl_dollars, @regime_trend, @sample)
+  `);
+  db.transaction((t) => t.forEach(r => insert.run(r)))(trades);
+}
+
+export function getORBRuns() {
+  return getDb().prepare('SELECT * FROM orb_backtest_runs ORDER BY run_at DESC, id DESC LIMIT 50').all();
+}
+
+export function getORBRun(runId) {
+  return getDb().prepare('SELECT * FROM orb_backtest_runs WHERE id = ?').get(runId);
+}
+
+export function getORBTrades(runId) {
+  return getDb().prepare('SELECT * FROM orb_backtest_trades WHERE run_id = ? ORDER BY trade_date ASC, entry_time ASC').all(runId);
 }
 
 export function getMRSweep(sweepId) {

@@ -103,7 +103,7 @@ function mapQuote(q, symbol) {
   };
 }
 
-function getNYDate(dt) {
+export function getNYDate(dt) {
   const parts = new Intl.DateTimeFormat('en-US', {
     timeZone: 'America/New_York',
     year: 'numeric',
@@ -116,7 +116,7 @@ function getNYDate(dt) {
   return `${y}-${m}-${d}`;
 }
 
-function getNYHHMM(dt) {
+export function getNYHHMM(dt) {
   const parts = new Intl.DateTimeFormat('en-US', {
     timeZone: 'America/New_York',
     hour: '2-digit',
