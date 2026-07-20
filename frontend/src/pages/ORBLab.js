@@ -97,7 +97,7 @@ export default function ORBLab({ onRunComplete, onSweepComplete }) {
   const [accountSize, setAccountSize] = useState(100000);
   const [positionPct, setPositionPct] = useState(10);
   const [riskPct, setRiskPct]         = useState(0.5);
-  const [compound, setCompound]       = useState(false);
+  const [compound, setCompound]       = useState(true);
   const [maxLeverage, setMaxLeverage] = useState(0);
   const [costPct, setCostPct]         = useState(0.02);
 
