@@ -4,8 +4,9 @@ import { loadEarningsAndSignals } from '../engine/signals.js';
 import { runBacktest } from '../engine/backtest.js';
 import { runSDBacktest } from '../engine/sdBacktest.js';
 import { runMRBacktest, runMRSweep } from '../engine/mrBacktest.js';
+import { runORBBacktest, runORBSweep } from '../engine/orbBacktest.js';
 import { parsePineScriptParams } from '../engine/parsePineScript.js';
-import { getBacktestRuns, getBacktestTrades, getEarningsEvents, removeStock, getSDRuns, getSDTrades, getMRRuns, getMRRun, getMRTrades, getMRSweep } from '../data/db.js';
+import { getBacktestRuns, getBacktestTrades, getEarningsEvents, removeStock, getSDRuns, getSDTrades, getMRRuns, getMRRun, getMRTrades, getMRSweep, getORBRuns, getORBRun, getORBTrades, getORBSweep } from '../data/db.js';
 
 const router = express.Router();
 
@@ -249,6 +250,76 @@ router.get('/mr/backtest/runs/:id/trades', (req, res) => {
 router.get('/mr/sweeps/:sweepId', (req, res) => {
   try {
     res.json({ success: true, data: getMRSweep(req.params.sweepId) });
+  } catch (e) {
+    res.status(500).json({ success: false, error: e.message });
+  }
+});
+
+// === OPENING-RANGE BREAKOUT BACKTEST ===
+
+router.post('/orb/backtest/run', async (req, res) => {
+  const { symbol, dateFrom, dateTo, ...params } = req.body;
+  if (!symbol || !dateFrom || !dateTo) {
+    return res.status(400).json({ success: false, error: 'symbol, dateFrom, and dateTo are required' });
+  }
+  try {
+    const result = await runORBBacktest(symbol.toUpperCase(), dateFrom, dateTo, {
+      ...params,
+      apiKey: process.env.FMP_API_KEY || null,
+    });
+    if (result.error) return res.json({ success: false, error: result.error });
+    res.json({ success: true, data: result });
+  } catch (e) {
+    console.error('ORB backtest failed:', e);
+    res.status(500).json({ success: false, error: e.message });
+  }
+});
+
+router.post('/orb/sweep/run', async (req, res) => {
+  const { symbol, dateFrom, dateTo, baseParams, grid } = req.body;
+  if (!symbol || !dateFrom || !dateTo) {
+    return res.status(400).json({ success: false, error: 'symbol, dateFrom, and dateTo are required' });
+  }
+  try {
+    const result = await runORBSweep(symbol.toUpperCase(), dateFrom, dateTo, {
+      ...(baseParams || {}),
+      apiKey: process.env.FMP_API_KEY || null,
+    }, grid || {});
+    if (result.error) return res.json({ success: false, error: result.error });
+    res.json({ success: true, data: result });
+  } catch (e) {
+    console.error('ORB sweep failed:', e);
+    res.status(500).json({ success: false, error: e.message });
+  }
+});
+
+router.get('/orb/backtest/runs', (req, res) => {
+  try {
+    res.json({ success: true, data: getORBRuns() });
+  } catch (e) {
+    res.status(500).json({ success: false, error: e.message });
+  }
+});
+
+router.get('/orb/backtest/runs/:id', (req, res) => {
+  try {
+    res.json({ success: true, data: getORBRun(parseInt(req.params.id)) });
+  } catch (e) {
+    res.status(500).json({ success: false, error: e.message });
+  }
+});
+
+router.get('/orb/backtest/runs/:id/trades', (req, res) => {
+  try {
+    res.json({ success: true, data: getORBTrades(parseInt(req.params.id)) });
+  } catch (e) {
+    res.status(500).json({ success: false, error: e.message });
+  }
+});
+
+router.get('/orb/sweeps/:sweepId', (req, res) => {
+  try {
+    res.json({ success: true, data: getORBSweep(req.params.sweepId) });
   } catch (e) {
     res.status(500).json({ success: false, error: e.message });
   }

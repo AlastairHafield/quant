@@ -561,6 +561,10 @@ export function getMRSweep(sweepId) {
   return getDb().prepare('SELECT * FROM mr_backtest_runs WHERE sweep_id = ? ORDER BY oos_sharpe DESC').all(sweepId);
 }
 
+export function getORBSweep(sweepId) {
+  return getDb().prepare('SELECT * FROM orb_backtest_runs WHERE sweep_id = ? ORDER BY oos_sharpe DESC').all(sweepId);
+}
+
 // S&D backtest
 export function saveSDRun(run) {
   const result = getDb().prepare(`

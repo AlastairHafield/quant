@@ -23,3 +23,9 @@ export const runMRSweep = (body) => api.post('/mr/sweep/run', body).then(r => r.
 export const getMRRuns = () => api.get('/mr/backtest/runs').then(r => r.data);
 export const getMRTrades = (id) => api.get(`/mr/backtest/runs/${id}/trades`).then(r => r.data);
 export const getMRSweep = (sweepId) => api.get(`/mr/sweeps/${sweepId}`).then(r => r.data);
+
+export const runORBBacktest = (body) => api.post('/orb/backtest/run', body).then(r => r.data);
+export const runORBSweep = (body) => api.post('/orb/sweep/run', body).then(r => r.data);
+export const getORBRuns = () => api.get('/orb/backtest/runs').then(r => r.data);
+export const getORBTrades = (id) => api.get(`/orb/backtest/runs/${id}/trades`).then(r => r.data);
+export const getORBSweep = (sweepId) => api.get(`/orb/sweeps/${sweepId}`).then(r => r.data);
