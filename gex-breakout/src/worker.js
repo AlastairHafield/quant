@@ -24,7 +24,14 @@ import { SessionRiskManager, checkDataHealth, checkRecalcSettle, computeSizeMult
 import { evaluateExit } from "./exitRules.js";
 import { startStatusReporter } from "./statusReporter.js";
 import { SignalLogger, buildLogRow } from "./logger.js";
-import { postDiscordEmbed, buildTradeTakenEmbed, buildSignalEmbed, flushLogBufferToDiscord } from "./discord.js";
+import {
+  postDiscordEmbed,
+  buildTradeTakenEmbed,
+  buildSignalEmbed,
+  buildDailySummaryEmbed,
+  flushLogBufferToDiscord,
+} from "./discord.js";
+import { computeDailySummary } from "./dailySummary.js";
 import {
   updateMfeMae,
   computeRealizedPnl,
@@ -669,7 +676,10 @@ export class Worker {
       await topstepx.closePositionAndCancelOrders(accountId, trade.contractId);
       this.trackedTrades = this.trackedTrades.filter((t) => t !== trade);
       this.logClosedTrade(trade, result.reason);
-      this.postDynamicExitEmbed(trade, result.reason, `Exited early — $${valueSaved.toFixed(2)} of stop risk removed`);
+      this.logDynamicExitAction(trade, "EXIT_NOW", result.reason, valueSaved, {
+        exitPrice: bar.close,
+        originalStopPrice: trade.originalStopPrice,
+      });
       return;
     }
 
@@ -696,11 +706,11 @@ export class Worker {
       await this.reopenAt(trade, remainingSize, clampedStopPrice, bar.close);
       trade.stopPrice = clampedStopPrice;
       trade.size = remainingSize;
-      this.postDynamicExitEmbed(
-        trade,
-        result.reason,
-        `Took partial (${reduceSize} of ${reduceSize + remainingSize}) — $${valueGained.toFixed(2)} locked in, ${remainingSize} still running`
-      );
+      this.logDynamicExitAction(trade, "TAKE_PARTIAL", result.reason, valueGained, {
+        reduceSize,
+        remainingSize,
+        atPrice: bar.close,
+      });
     }
   }
 
@@ -739,14 +749,44 @@ export class Worker {
     await this.reopenAt(trade, trade.size, clampedStopPrice, currentPrice);
     trade.stopPrice = clampedStopPrice;
     const valueSaved = computeTightenTrailValueSaved(oldStopPrice, clampedStopPrice, pointValue, trade.size);
-    this.postDynamicExitEmbed(
-      trade,
-      reason,
-      `Stop moved ${oldStopPrice.toFixed(2)} → ${clampedStopPrice.toFixed(2)} — $${valueSaved.toFixed(2)} of risk reduced`
-    );
+    this.logDynamicExitAction(trade, reason === "breakeven_at_1r" ? "BREAKEVEN" : "TIGHTEN_TRAIL", reason, valueSaved, {
+      oldStopPrice,
+      newStopPrice: clampedStopPrice,
+    });
   }
 
-  postDynamicExitEmbed(trade, reason, description) {
+  // Records an in-trade management action both for the real-time Discord ping
+  // (reasoning fields, same pattern as buildTradeTakenEmbed) and durably in
+  // Mongo (exitActions collection) so it shows up in the trade journal and
+  // daily summary — closeTrade/logClosedTrade only ever capture a trade's
+  // full close, so without this, TIGHTEN_TRAIL/TAKE_PARTIAL/breakeven would
+  // leave no queryable record of why a stop moved or what it was worth.
+  logDynamicExitAction(trade, action, reason, valueImpact, extra) {
+    const dayKey = nowET().toDateString();
+    tradeJournal
+      .logExitAction(
+        {
+          tradeMongoId: trade.mongoId,
+          system: "gex-breakout",
+          strategy: trade.strategy,
+          direction: trade.direction,
+          action,
+          reason,
+          valueImpact,
+          size: trade.size,
+          ...extra,
+        },
+        dayKey
+      )
+      .catch((e) => console.error("Mongo logExitAction failed:", e.message));
+
+    const description =
+      action === "EXIT_NOW"
+        ? `Exited early — $${valueImpact.toFixed(2)} of stop risk removed`
+        : action === "TAKE_PARTIAL"
+          ? `Took partial (${extra.reduceSize} of ${extra.reduceSize + extra.remainingSize}) — $${valueImpact.toFixed(2)} locked in, ${extra.remainingSize} still running`
+          : `Stop moved ${extra.oldStopPrice.toFixed(2)} → ${extra.newStopPrice.toFixed(2)} — $${valueImpact.toFixed(2)} of risk reduced`;
+
     postDiscordEmbed(
       CONFIG.discord.signalWebhook,
       buildSignalEmbed({
@@ -914,7 +954,15 @@ async function startWorker() {
       .then(async (alreadyFlushed) => {
         if (alreadyFlushed) return;
         await tradeJournal.markDayFlushed(dayKey);
-        const rows = await tradeJournal.fetchDayRows(dayKey);
+
+        const [rows, trades, exitActions] = await Promise.all([
+          tradeJournal.fetchDayRows(dayKey),
+          tradeJournal.fetchDayTrades(dayKey),
+          tradeJournal.fetchDayExitActions(dayKey),
+        ]);
+        const summary = computeDailySummary(trades, exitActions, rows);
+        await tradeJournal.writeDailySummary(dayKey, summary);
+        await postDiscordEmbed(CONFIG.discord.logWebhook, buildDailySummaryEmbed(summary, dayKey));
         await flushLogBufferToDiscord(CONFIG.discord.logWebhook, rows, dayKey, "scheduled");
       })
       .catch((e) => console.error("Scheduled log flush failed:", e.message));

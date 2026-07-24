@@ -62,6 +62,31 @@ export async function closeTrade(mongoId, update) {
   await db.collection("trades").updateOne({ _id: mongoId }, { $set: { status: "closed", ...update } });
 }
 
+// A record of an in-trade management action (breakeven move, tighten-trail,
+// take-partial) that adjusts an open trade without closing it — closeTrade
+// above only captures full closes, so without this, everything except
+// EXIT_NOW would leave no queryable trace of "why did the stop move" or
+// "$ value saved/gained," only a Discord message.
+export async function logExitAction(action, dayKey) {
+  const db = await getDb();
+  await db.collection("exitActions").insertOne({ ...action, dayKey, ts: new Date().toISOString() });
+}
+
+export async function fetchDayTrades(dayKey) {
+  const db = await getDb();
+  return db.collection("trades").find({ dayKey }).sort({ openedAt: 1 }).toArray();
+}
+
+export async function fetchDayExitActions(dayKey) {
+  const db = await getDb();
+  return db.collection("exitActions").find({ dayKey }).sort({ ts: 1 }).toArray();
+}
+
+export async function writeDailySummary(dayKey, summary) {
+  const db = await getDb();
+  await db.collection("dailySummaries").updateOne({ dayKey }, { $set: { ...summary, dayKey } }, { upsert: true });
+}
+
 export async function fetchDayRows(dayKey) {
   const db = await getDb();
   return db.collection("signals").find({ dayKey }).sort({ ts: 1 }).toArray();

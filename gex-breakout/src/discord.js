@@ -45,6 +45,38 @@ export async function postDiscordEmbed(webhookUrl, embedPayload, fetchImpl = fet
   return { ok: true };
 }
 
+// Human-readable end-of-day recap — posted alongside (before) the raw .jsonl
+// file dump below, which stays for anyone who wants the full detail. Built
+// from dailySummary.js's computeDailySummary output.
+export function buildDailySummaryEmbed(summary, dayKey) {
+  const { trades, vetoes, dynamicExits } = summary;
+  const pnlSign = trades.totalRealizedPnl >= 0 ? "+" : "";
+  const strategyLines = Object.entries(trades.byStrategy)
+    .map(([s, v]) => `${s}: ${v.count} trades, ${v.pnl >= 0 ? "+" : ""}$${v.pnl.toFixed(2)}`)
+    .join("\n") || "—";
+  const vetoLines = Object.entries(vetoes)
+    .sort((a, b) => b[1] - a[1])
+    .map(([reason, count]) => `${reason}: ${count}`)
+    .join("\n") || "—";
+  const dynamicExitLines = Object.entries(dynamicExits.byAction)
+    .map(([action, v]) => `${action}: ${v.count}x, $${v.valueImpact.toFixed(2)}`)
+    .join("\n") || "—";
+
+  return buildSignalEmbed({
+    title: `📊 Daily Summary — GEX Breakout · ${dayKey}`,
+    description: `${trades.totalTrades} trades, ${trades.wins}W/${trades.losses}L — ${pnlSign}$${trades.totalRealizedPnl.toFixed(2)}`,
+    color: trades.totalRealizedPnl >= 0 ? 0x2ecc71 : 0xe74c3c,
+    fields: [
+      ["Win rate", trades.winRate != null ? `${(trades.winRate * 100).toFixed(0)}%` : "—"],
+      ["Avg R", trades.avgRMultiple != null ? trades.avgRMultiple.toFixed(2) : "—"],
+      ["By strategy", strategyLines],
+      ["Dynamic exits ($ impact)", dynamicExitLines],
+      ["Top veto reasons", vetoLines],
+    ],
+    footerText: `GEX Breakout · daily summary · ${new Date().toISOString()}`,
+  });
+}
+
 export async function flushLogBufferToDiscord(webhookUrl, rows, day, reason, fetchImpl = fetch) {
   if (!rows.length || !webhookUrl) return { skipped: true };
 

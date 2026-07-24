@@ -1,6 +1,12 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { buildSignalEmbed, buildTradeTakenEmbed, postDiscordEmbed, flushLogBufferToDiscord } from "../src/discord.js";
+import {
+  buildSignalEmbed,
+  buildTradeTakenEmbed,
+  buildDailySummaryEmbed,
+  postDiscordEmbed,
+  flushLogBufferToDiscord,
+} from "../src/discord.js";
 
 test("buildSignalEmbed: shapes an embed with inline fields and a footer", () => {
   const embed = buildSignalEmbed({
@@ -58,6 +64,40 @@ test("buildTradeTakenEmbed: short trade is red and omits the strategy suffix whe
   assert.doesNotMatch(e.title, /Strategy/);
   assert.equal(e.color, 0xe74c3c);
   assert.ok(e.fields.some((f) => f.name === "Order ID" && f.value === "—"));
+});
+
+test("buildDailySummaryEmbed: green when net positive, shows win rate/avg R/breakdowns", () => {
+  const summary = {
+    trades: {
+      totalTrades: 3, wins: 2, losses: 1, winRate: 2 / 3, totalRealizedPnl: 125, avgRMultiple: 0.8,
+      byStrategy: { A: { count: 2, pnl: 150 }, B: { count: 1, pnl: -25 } },
+    },
+    vetoes: { flow_grade_F: 5, wall_too_close: 2 },
+    dynamicExits: { totalValueImpact: 60, byAction: { EXIT_NOW: { count: 1, valueImpact: 60 } } },
+  };
+  const embed = buildDailySummaryEmbed(summary, "2026-07-24");
+  const e = embed.embeds[0];
+  assert.equal(e.color, 0x2ecc71);
+  assert.match(e.description, /3 trades/);
+  assert.match(e.description, /2W\/1L/);
+  assert.match(e.description, /\+\$125\.00/);
+  assert.ok(e.fields.some((f) => f.name === "Win rate" && f.value === "67%"));
+  assert.ok(e.fields.some((f) => f.name === "Avg R" && f.value === "0.80"));
+  assert.ok(e.fields.some((f) => f.name === "By strategy" && f.value.includes("A: 2 trades")));
+  assert.ok(e.fields.some((f) => f.name === "Top veto reasons" && f.value.includes("flow_grade_F: 5")));
+});
+
+test("buildDailySummaryEmbed: red when net negative, handles an all-empty day gracefully", () => {
+  const summary = {
+    trades: { totalTrades: 0, wins: 0, losses: 0, winRate: null, totalRealizedPnl: -10, avgRMultiple: null, byStrategy: {} },
+    vetoes: {},
+    dynamicExits: { totalValueImpact: 0, byAction: {} },
+  };
+  const embed = buildDailySummaryEmbed(summary, "2026-07-24");
+  const e = embed.embeds[0];
+  assert.equal(e.color, 0xe74c3c);
+  assert.ok(e.fields.some((f) => f.name === "Win rate" && f.value === "—"));
+  assert.ok(e.fields.some((f) => f.name === "By strategy" && f.value === "—"));
 });
 
 test("postDiscordEmbed: skips the network call entirely when no webhook is configured", async () => {
