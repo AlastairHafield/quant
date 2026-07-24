@@ -9,6 +9,7 @@ import { parsePineScriptParams } from '../engine/parsePineScript.js';
 import { getBacktestRuns, getBacktestTrades, getEarningsEvents, removeStock, getSDRuns, getSDTrades, getMRRuns, getMRRun, getMRTrades, getMRSweep, getORBRuns, getORBRun, getORBTrades, getORBSweep } from '../data/db.js';
 import { setGexBreakoutStatus, getGexBreakoutStatus } from '../data/gexBreakoutStatus.js';
 import { setMechanicalOrbStatus, getMechanicalOrbStatus } from '../data/mechanicalOrbStatus.js';
+import { fetchTrades, fetchExitActions, fetchDailySummaries } from '../data/tradeJournalMongo.js';
 
 const router = express.Router();
 
@@ -376,6 +377,35 @@ router.get('/mechanical-orb/status', (req, res) => {
   const status = getMechanicalOrbStatus();
   if (!status) return res.status(404).json({ success: false, error: 'no status reported yet' });
   res.json({ success: true, data: status });
+});
+
+// === TRADE JOURNAL (read-only, backed by gex-breakout's Mongo trade journal) ===
+
+router.get('/trade-journal/trades', async (req, res) => {
+  try {
+    const trades = await fetchTrades({ dayKey: req.query.dayKey || undefined });
+    res.json({ success: true, data: trades });
+  } catch (e) {
+    res.status(500).json({ success: false, error: e.message });
+  }
+});
+
+router.get('/trade-journal/exit-actions', async (req, res) => {
+  try {
+    const exitActions = await fetchExitActions({ dayKey: req.query.dayKey || undefined });
+    res.json({ success: true, data: exitActions });
+  } catch (e) {
+    res.status(500).json({ success: false, error: e.message });
+  }
+});
+
+router.get('/trade-journal/daily-summaries', async (req, res) => {
+  try {
+    const summaries = await fetchDailySummaries();
+    res.json({ success: true, data: summaries });
+  } catch (e) {
+    res.status(500).json({ success: false, error: e.message });
+  }
 });
 
 export default router;

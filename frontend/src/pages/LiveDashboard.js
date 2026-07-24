@@ -1,10 +1,12 @@
 import React, { useState } from 'react';
 import GexBreakoutDashboard from './GexBreakoutDashboard';
 import MechanicalOrbDashboard from './MechanicalOrbDashboard';
+import TradeJournal from './TradeJournal';
 
 const STRATS = [
   { id: 'gex', label: 'GEX Breakout', icon: '⬤', Component: GexBreakoutDashboard },
   { id: 'morb', label: 'Mechanical ORB', icon: '⬤', Component: MechanicalOrbDashboard },
+  { id: 'journal', label: 'Trade Journal', icon: '📓', Component: TradeJournal },
 ];
 
 export default function LiveDashboard() {
