@@ -5,6 +5,7 @@ import {
   orbWindowBounds,
   isWithinOrbWindow,
   updateOrbRange,
+  computeOrbFromHistoricalBars,
   shiftWalls,
   buildLevelState,
   shouldFlushLogNow,
@@ -38,6 +39,30 @@ test("updateOrbRange: expands high/low as bars come in, starting from null", () 
   assert.deepEqual(range, { orbHigh: 5515, orbLow: 5505 }); // high extends, low doesn't retreat
   range = updateOrbRange(range, { high: 5512, low: 5500 });
   assert.deepEqual(range, { orbHigh: 5515, orbLow: 5500 });
+});
+
+// identityToET stands in for the module's real ET-conversion function — bar
+// timestamps here are constructed as already-ET-equivalent local Dates, same
+// convention the rest of this suite uses to stay deterministic regardless of
+// the machine's own timezone.
+const identityToET = (d) => d;
+
+test("computeOrbFromHistoricalBars: reduces bars falling in the day+window to high/low, ignoring bars outside either", () => {
+  const bounds = { startMin: 570, endMin: 585 }; // 9:30-9:45
+  const bars = [
+    { high: 5510, low: 5505, timestamp: new Date(2026, 6, 24, 9, 32) },
+    { high: 5520, low: 5502, timestamp: new Date(2026, 6, 24, 9, 40) },
+    { high: 5530, low: 5525, timestamp: new Date(2026, 6, 24, 9, 50) }, // right day, outside the window
+    { high: 5999, low: 5001, timestamp: new Date(2026, 6, 23, 9, 32) }, // right window, wrong day
+  ];
+  const range = computeOrbFromHistoricalBars(bars, new Date(2026, 6, 24).toDateString(), bounds, identityToET);
+  assert.deepEqual(range, { high: 5520, low: 5502 });
+});
+
+test("computeOrbFromHistoricalBars: null when no bars fall in the day+window", () => {
+  const bounds = { startMin: 570, endMin: 585 };
+  const bars = [{ high: 5510, low: 5505, timestamp: new Date(2026, 6, 24, 10, 0) }];
+  assert.equal(computeOrbFromHistoricalBars(bars, new Date(2026, 6, 24).toDateString(), bounds, identityToET), null);
 });
 
 test("shiftWalls: shifts every wall's strike by the basis, preserving wallType/gex", () => {

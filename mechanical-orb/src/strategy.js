@@ -19,6 +19,25 @@ export function updateOrbRange(current, bar) {
   };
 }
 
+// Reduces already-fetched historical bars (real UTC timestamps) down to the
+// high/low of whatever ET calendar day + window they actually fall in. Used to
+// backfill the ORB from history when a worker restarts after today's window
+// has already closed and the live bar stream has no memory of it. Takes the
+// ET-conversion function as a parameter to keep this module free of
+// timezone-specific logic (worker.js owns toET). Returns null if no bars fall
+// in the window (e.g. contract too new, or a holiday).
+export function computeOrbFromHistoricalBars(bars, dayKey, bounds, toET) {
+  const windowBars = bars.filter((b) => {
+    const bt = toET(new Date(b.timestamp));
+    return bt.toDateString() === dayKey && minutesOf(bt) >= bounds.startMin && minutesOf(bt) < bounds.endMin;
+  });
+  if (!windowBars.length) return null;
+  return {
+    high: Math.max(...windowBars.map((b) => b.high)),
+    low: Math.min(...windowBars.map((b) => b.low)),
+  };
+}
+
 // Validated LONG-only (orb-alpaca-1m-findings: SHORT loses outright, BOTH dilutes
 // the edge) — a plain CLOSE trigger beyond the OR high, no extra buffer.
 export function checkTrigger(price, orbHigh, bufferPts, direction) {

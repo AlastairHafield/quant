@@ -108,6 +108,29 @@ export async function fetchLastPrice(symbolText) {
   return bars[bars.length - 1].c;
 }
 
+// Real-UTC lookback window (not ET-relative — callers filter the returned
+// bars' own timestamps down to whatever ET window they actually need). Used
+// to backfill the opening-range high/low from history when a worker starts
+// or restarts after today's ORB window has already closed, since the live
+// bar stream only ever builds the ORB in real time and has no memory of a
+// window it wasn't running for.
+export async function fetchRecentBars(symbolText, lookbackMinutes) {
+  const contractId = await resolveFrontMonthContractId(symbolText);
+  const now = new Date();
+  const start = new Date(now.getTime() - lookbackMinutes * 60_000);
+  const data = await apiPost("/api/History/retrieveBars", {
+    contractId,
+    live: false,
+    startTime: start.toISOString(),
+    endTime: now.toISOString(),
+    unit: 2, // Minute
+    unitNumber: 1,
+    limit: lookbackMinutes,
+    includePartialBar: false,
+  });
+  return (data.bars ?? []).map((b) => ({ high: b.h, low: b.l, close: b.c, timestamp: b.t }));
+}
+
 // Completed daily bars only (includePartialBar: false), sorted ascending (oldest
 // first) so the last element is "yesterday" and adx()'s day-over-day math runs
 // forward in time — confirmed live 2026-07-24 that the API returns bars *newest*

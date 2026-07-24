@@ -27,8 +27,12 @@ import { updateMfeMae } from "./positionTracking.js";
 import * as topstepx from "./dataSources/topstepx.js";
 import * as flashalpha from "./dataSources/flashalpha.js";
 
+export function toET(d) {
+  return new Date(d.toLocaleString("en-US", { timeZone: "America/New_York" }));
+}
+
 export function nowET() {
-  return new Date(new Date().toLocaleString("en-US", { timeZone: "America/New_York" }));
+  return toET(new Date());
 }
 
 export function minutesOf(t) {
@@ -58,6 +62,26 @@ export function updateOrbRange(current, bar) {
   return {
     orbHigh: current.orbHigh == null ? bar.high : Math.max(current.orbHigh, bar.high),
     orbLow: current.orbLow == null ? bar.low : Math.min(current.orbLow, bar.low),
+  };
+}
+
+// Reduces already-fetched historical bars (real UTC timestamps) down to the
+// high/low of whatever ET calendar day + window they actually fall in — the
+// pure half of backfillOrbIfPastWindow, split out so it's testable without a
+// live TopstepX call. Takes the ET-conversion function as a parameter so
+// tests can inject a deterministic stand-in instead of the real timezone
+// round-trip. Returns null if no bars fall in the window (e.g. the contract
+// is too new, or it's a holiday) — the caller just leaves the ORB unlocked
+// and tries again on the next bar.
+export function computeOrbFromHistoricalBars(bars, dayKey, bounds, toETFn = toET) {
+  const windowBars = bars.filter((b) => {
+    const bt = toETFn(new Date(b.timestamp));
+    return bt.toDateString() === dayKey && minutesOf(bt) >= bounds.startMin && minutesOf(bt) < bounds.endMin;
+  });
+  if (!windowBars.length) return null;
+  return {
+    high: Math.max(...windowBars.map((b) => b.high)),
+    low: Math.min(...windowBars.map((b) => b.low)),
   };
 }
 
@@ -97,6 +121,7 @@ export class Worker {
     this.orbHigh = null;
     this.orbLow = null;
     this.orbLocked = false;
+    this.orbBackfillInFlight = false;
     this.gexSnapshot = null;
     this.basis = null;
     this.basisAsOf = null;
@@ -208,6 +233,25 @@ export class Worker {
     this.rebuildLevels();
   }
 
+  // Only ever populated by live streamed bars during the window (see onBar) —
+  // a worker that starts or restarts after today's window has already closed
+  // has no memory of it and would otherwise never lock an ORB for the rest of
+  // the day. That matters beyond Strategy A: onBar gates Strategy B behind
+  // orbLocked too even though B doesn't itself need the ORB. No-ops (and
+  // stays retriable) until the window has actually ended; self-resolves once
+  // it does, without needing a permanent "already tried" flag.
+  async backfillOrbIfPastWindow(t) {
+    const bounds = orbWindowBounds(CONFIG);
+    if (minutesOf(t) < bounds.endMin) return;
+    const bars = await topstepx.fetchRecentBars(CONFIG.instrumentData, 720);
+    const range = computeOrbFromHistoricalBars(bars, t.toDateString(), bounds);
+    if (!range) return;
+    this.orbHigh = range.high;
+    this.orbLow = range.low;
+    this.orbLocked = true;
+    this.rebuildLevels();
+  }
+
   onBar(rawBar, t = nowET()) {
     const prevCum = this.bars.length ? this.bars[this.bars.length - 1].cumDelta : 0;
     const delta = rawBar.buyVolume - rawBar.sellVolume;
@@ -225,6 +269,14 @@ export class Worker {
     if (!this.orbLocked && this.orbHigh != null) {
       this.orbLocked = true;
       this.rebuildLevels();
+    }
+    if (!this.orbLocked && !this.orbBackfillInFlight) {
+      this.orbBackfillInFlight = true;
+      this.backfillOrbIfPastWindow(t)
+        .catch((e) => console.error("ORB backfill failed:", e.message))
+        .finally(() => {
+          this.orbBackfillInFlight = false;
+        });
     }
     if (!this.orbLocked) return;
 

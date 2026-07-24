@@ -5,6 +5,7 @@ import {
   orbWindowBounds,
   isWithinOrbWindow,
   updateOrbRange,
+  computeOrbFromHistoricalBars,
   evaluateEntry,
   shouldFlattenNow,
   minutesOf,
@@ -16,8 +17,12 @@ import { startStatusReporter } from "./statusReporter.js";
 import { updateMfeMae } from "./positionTracking.js";
 import * as topstepx from "./dataSources/topstepx.js";
 
+export function toET(d) {
+  return new Date(d.toLocaleString("en-US", { timeZone: "America/New_York" }));
+}
+
 export function nowET() {
-  return new Date(new Date().toLocaleString("en-US", { timeZone: "America/New_York" }));
+  return toET(new Date());
 }
 
 // Returns the day-key to flush for if it's at/past the scheduled flush time and
@@ -35,6 +40,7 @@ export class Worker {
     this.orbHigh = null;
     this.orbLow = null;
     this.orbLocked = false;
+    this.orbBackfillInFlight = false;
     this.priorDayAdx = null;
     this.priorDayAdxOk = false;
     this.dayState = { tradedToday: false };
@@ -105,6 +111,23 @@ export class Worker {
     this.refreshAdx().catch((e) => console.error("ADX refresh failed:", e.message));
   }
 
+  // Only ever populated by live streamed bars during the window (see onBar) —
+  // a worker that starts or restarts after today's window has already closed
+  // has no memory of it and would otherwise never lock an ORB for the rest of
+  // the day. No-ops (and stays retriable) until the window has actually
+  // ended; self-resolves once it does, without needing a permanent "already
+  // tried" flag.
+  async backfillOrbIfPastWindow(t) {
+    const bounds = orbWindowBounds(CONFIG);
+    if (minutesOf(t) < bounds.endMin) return;
+    const bars = await topstepx.fetchRecentBars(CONFIG.instrument, 720);
+    const range = computeOrbFromHistoricalBars(bars, t.toDateString(), bounds, toET);
+    if (!range) return;
+    this.orbHigh = range.high;
+    this.orbLow = range.low;
+    this.orbLocked = true;
+  }
+
   onBar(rawBar, t = nowET()) {
     this.checkDayRollover(t);
     this.bars.push(rawBar);
@@ -122,6 +145,14 @@ export class Worker {
     }
     if (!this.orbLocked && this.orbHigh != null) {
       this.orbLocked = true;
+    }
+    if (!this.orbLocked && !this.orbBackfillInFlight) {
+      this.orbBackfillInFlight = true;
+      this.backfillOrbIfPastWindow(t)
+        .catch((e) => console.error("ORB backfill failed:", e.message))
+        .finally(() => {
+          this.orbBackfillInFlight = false;
+        });
     }
     if (!this.orbLocked) return;
 
