@@ -7,6 +7,7 @@ import {
   updateOrbRange,
   shiftWalls,
   buildLevelState,
+  shouldFlushLogNow,
   createWorker,
 } from "../src/worker.js";
 import { CONFIG } from "../src/config.js";
@@ -191,4 +192,68 @@ test("Worker end-to-end: the consecutive-loss kill switch stops further trading 
     new Date(2026, 6, 24, 9, 46)
   );
   assert.equal(worker.logger.size, 0); // evaluateSignals bails out before ever logging
+});
+
+test("Worker: onBar updates MFE/MAE for every tracked trade as new bars arrive", () => {
+  const worker = createWorker();
+  worker.trackedTrades.push({
+    strategy: "A", direction: "long", entryPrice: 5500, stopPrice: 5490, targetPrice: 5520,
+    contractId: "CON.F.US.EP.U26", size: 4, orderId: 1, mfe: 0, mae: 0, openedAt: "t",
+  });
+
+  worker.onBar(esBar({ high: 5510, low: 5497, close: 5505, buyVolume: 10, sellVolume: 5 }), new Date(2026, 6, 24, 9, 10));
+  assert.equal(worker.trackedTrades[0].mfe, 10); // 5510-5500
+  assert.equal(worker.trackedTrades[0].mae, 3); // 5500-5497
+
+  worker.onBar(esBar({ high: 5508, low: 5480, close: 5490, buyVolume: 5, sellVolume: 20 }), new Date(2026, 6, 24, 9, 11));
+  assert.equal(worker.trackedTrades[0].mfe, 10); // unchanged, prior bar's high was better
+  assert.equal(worker.trackedTrades[0].mae, 20); // 5500-5480, new worse adverse excursion
+});
+
+test("Worker: detectClosedTrades logs a closed-trade row (with MFE/MAE) once the broker no longer reports the position", () => {
+  const worker = createWorker();
+  worker.trackedTrades.push({
+    strategy: "B", direction: "short", entryPrice: 5500, stopPrice: 5510, targetPrice: 5470,
+    contractId: "CON.F.US.EP.U26", size: 2, orderId: 42, mfe: 15, mae: 4, openedAt: "t",
+  });
+  worker.bars.push({ close: 5486 });
+
+  worker.openPositions = []; // broker reports nothing for this contract -> closed
+  worker.detectClosedTrades();
+
+  assert.equal(worker.trackedTrades.length, 0);
+  const row = worker.logger.buffer.find((r) => r.outcome === "closed");
+  assert.ok(row, "expected a closed-trade log row");
+  assert.equal(row.strategy, "B");
+  assert.equal(row.direction, "short");
+  assert.equal(row.mfe, 15);
+  assert.equal(row.mae, 4);
+  assert.equal(row.approx_exit_price, 5486);
+});
+
+test("Worker: detectClosedTrades leaves a trade tracked while the broker still reports a matching position", () => {
+  const worker = createWorker();
+  worker.trackedTrades.push({
+    strategy: "A", direction: "long", entryPrice: 5500, stopPrice: 5490, targetPrice: 5520,
+    contractId: "CON.F.US.EP.U26", size: 4, orderId: 1, mfe: 5, mae: 2, openedAt: "t",
+  });
+  worker.openPositions = [{ contractId: "CON.F.US.EP.U26", size: 4 }];
+  worker.detectClosedTrades();
+
+  assert.equal(worker.trackedTrades.length, 1);
+  assert.equal(worker.logger.size, 0);
+});
+
+test("shouldFlushLogNow: null before the scheduled time or if already flushed today", () => {
+  const flushET = { h: 16, m: 5 };
+  assert.equal(shouldFlushLogNow(new Date(2026, 6, 24, 16, 4), flushET, null), null);
+  const today = new Date(2026, 6, 24, 16, 5).toDateString();
+  assert.equal(shouldFlushLogNow(new Date(2026, 6, 24, 16, 5), flushET, today), null);
+});
+
+test("shouldFlushLogNow: returns the day-key once at/after the scheduled time on a not-yet-flushed day", () => {
+  const flushET = { h: 16, m: 5 };
+  const t = new Date(2026, 6, 24, 16, 10);
+  assert.equal(shouldFlushLogNow(t, flushET, null), t.toDateString());
+  assert.equal(shouldFlushLogNow(t, flushET, "some other day"), t.toDateString());
 });

@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { buildSignalEmbed, buildTradeTakenEmbed, postDiscordEmbed } from "../src/discord.js";
+import { buildSignalEmbed, buildTradeTakenEmbed, postDiscordEmbed, flushLogBufferToDiscord } from "../src/discord.js";
 
 test("buildSignalEmbed: shapes an embed with inline fields and a footer", () => {
   const embed = buildSignalEmbed({
@@ -37,4 +37,20 @@ test("postDiscordEmbed: skips the network call when no webhook is configured", a
   const result = await postDiscordEmbed(null, { embeds: [] }, async () => { called = true; return { ok: true }; });
   assert.equal(result.skipped, true);
   assert.equal(called, false);
+});
+
+test("flushLogBufferToDiscord: skips when there are no rows or no webhook configured", async () => {
+  let called = false;
+  const fakeFetch = async () => { called = true; return { ok: true }; };
+  assert.deepEqual(await flushLogBufferToDiscord("https://discord.test/webhook", [], "2026-07-24", "scheduled", fakeFetch), { skipped: true });
+  assert.deepEqual(await flushLogBufferToDiscord(null, [{ ts: "t" }], "2026-07-24", "scheduled", fakeFetch), { skipped: true });
+  assert.equal(called, false);
+});
+
+test("flushLogBufferToDiscord: posts a multipart form with the JSONL attachment on success", async () => {
+  let capturedInit;
+  const fakeFetch = async (url, init) => { capturedInit = init; return { ok: true }; };
+  const result = await flushLogBufferToDiscord("https://discord.test/webhook", [{ ts: "t1" }], "2026-07-24", "scheduled", fakeFetch);
+  assert.equal(result.ok, true);
+  assert.ok(capturedInit.body instanceof FormData);
 });

@@ -11,12 +11,21 @@ import {
 } from "./strategy.js";
 import { computeSize } from "./sizing.js";
 import { SignalLogger, buildLogRow } from "./logger.js";
-import { buildSignalEmbed, buildTradeTakenEmbed, postDiscordEmbed } from "./discord.js";
+import { buildSignalEmbed, buildTradeTakenEmbed, postDiscordEmbed, flushLogBufferToDiscord } from "./discord.js";
 import { startStatusReporter } from "./statusReporter.js";
+import { updateMfeMae } from "./positionTracking.js";
 import * as topstepx from "./dataSources/topstepx.js";
 
 export function nowET() {
   return new Date(new Date().toLocaleString("en-US", { timeZone: "America/New_York" }));
+}
+
+// Returns the day-key to flush for if it's at/past the scheduled flush time and
+// that day hasn't been flushed yet, else null.
+export function shouldFlushLogNow(t, logFlushET, lastFlushedDay) {
+  const dayKey = t.toDateString();
+  const isFlushTime = minutesOf(t) >= logFlushET.h * 60 + logFlushET.m;
+  return isFlushTime && lastFlushedDay !== dayKey ? dayKey : null;
 }
 
 export class Worker {
@@ -52,6 +61,37 @@ export class Worker {
     this.account = account;
     this.openPositions = positions;
     this.accountAsOf = new Date();
+    this.detectClosedTrade();
+  }
+
+  // The stop-loss order filling is the only way a position disappears without us
+  // calling flatten() ourselves (this strategy has no take-profit) — detected via
+  // the broker no longer reporting it, since we're polling REST rather than
+  // trusting the unverified user-hub push stream.
+  detectClosedTrade() {
+    if (!this.openPosition) return;
+    const stillOpen = this.openPositions.some((p) => p.contractId === this.openPosition.contractId);
+    if (stillOpen) return;
+    this.logClosedTrade(this.openPosition, "stopped_out");
+    this.openPosition = null;
+  }
+
+  logClosedTrade(trade, reason) {
+    const lastBar = this.bars.length ? this.bars[this.bars.length - 1] : null;
+    const row = buildLogRow({
+      ts: new Date().toISOString(),
+      direction: trade.direction,
+      adx: this.priorDayAdx,
+      orbHigh: this.orbHigh,
+      orbLow: this.orbLow,
+      entryPrice: trade.entryPrice,
+      stopPrice: trade.stopPrice,
+      outcome: reason,
+      mfe: trade.mfe,
+      mae: trade.mae,
+    });
+    row.approx_exit_price = lastBar?.close ?? null;
+    this.logger.log(row);
   }
 
   checkDayRollover(t) {
@@ -68,6 +108,13 @@ export class Worker {
   onBar(rawBar, t = nowET()) {
     this.checkDayRollover(t);
     this.bars.push(rawBar);
+
+    if (this.openPosition) {
+      Object.assign(
+        this.openPosition,
+        updateMfeMae(this.openPosition, this.openPosition.entryPrice, this.openPosition.direction, rawBar)
+      );
+    }
 
     if (isWithinOrbWindow(t, orbWindowBounds(CONFIG))) {
       Object.assign(this, updateOrbRange(this, rawBar));
@@ -157,7 +204,7 @@ export class Worker {
     // Tracked regardless of execution mode — the "one trade per day" guard in
     // onBar() depends on this being set even in signal-only mode, otherwise every
     // subsequent qualifying bar re-evaluates and spams an "already traded" veto.
-    this.openPosition = { ...result, size, contractId };
+    this.openPosition = { ...result, size, contractId, mfe: 0, mae: 0 };
 
     await postDiscordEmbed(
       CONFIG.discord.webhook,
@@ -186,6 +233,7 @@ export class Worker {
       await topstepx.closePositionAndCancelOrders(accountId, this.openPosition.contractId);
     }
     console.log(`Flattening EOD: ${this.openPosition.direction} @ ~${lastPrice}`);
+    this.logClosedTrade(this.openPosition, "eod_flatten");
     this.openPosition = null;
   }
 }
@@ -211,7 +259,22 @@ async function startWorker() {
 
   await topstepx.subscribeBars(CONFIG.instrument, (bar) => worker.onBar(bar));
 
-  process.on("SIGTERM", () => process.exit(0));
+  let lastFlushedDay = null;
+  setInterval(() => {
+    const dayKey = shouldFlushLogNow(nowET(), CONFIG.logFlushET, lastFlushedDay);
+    if (!dayKey) return;
+    lastFlushedDay = dayKey;
+    flushLogBufferToDiscord(CONFIG.discord.logWebhook, worker.logger.drain(), dayKey, "scheduled").catch((e) =>
+      console.error("Scheduled log flush failed:", e.message)
+    );
+  }, 60_000);
+
+  process.on("SIGTERM", async () => {
+    const rows = worker.logger.drain();
+    const day = new Date().toISOString().slice(0, 10);
+    await flushLogBufferToDiscord(CONFIG.discord.logWebhook, rows, day, "sigterm");
+    process.exit(0);
+  });
 }
 
 const isMain = process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href;

@@ -6,6 +6,7 @@ export const CONFIG = {
   orWindowMin: 15,
   entryCutoffET: { h: 12, m: 0 },
   flattenAtET: { h: 15, m: 55 }, // a few minutes before the 16:00 close, to ensure the fill lands in RTH
+  logFlushET: { h: 16, m: 5 }, // dump the day's structured log to Discord once, shortly after close
 
   direction: "long", // validated LONG-only — SHORT loses outright, BOTH dilutes the edge (orb-alpaca-1m-findings)
   triggerBufferPts: 0, // validated config used a plain CLOSE trigger, no extra buffer beyond the OR itself
@@ -42,6 +43,7 @@ export const CONFIG = {
 
   discord: {
     webhook: process.env.DISCORD_WEBHOOK || null,
+    logWebhook: process.env.LOG_WEBHOOK || null,
   },
 
   backendUrl: process.env.BACKEND_URL || "http://localhost:3001",

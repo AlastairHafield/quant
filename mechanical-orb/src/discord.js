@@ -41,3 +41,25 @@ export async function postDiscordEmbed(webhookUrl, embedPayload, fetchImpl = fet
   }
   return { ok: true };
 }
+
+export async function flushLogBufferToDiscord(webhookUrl, rows, day, reason, fetchImpl = fetch) {
+  if (!rows.length || !webhookUrl) return { skipped: true };
+
+  const filename = `mechanical-orb-log-${day}.jsonl`;
+  const content = rows.map((r) => JSON.stringify(r)).join("\n");
+  const form = new FormData();
+  form.append(
+    "payload_json",
+    JSON.stringify({ content: `Session log **${day}** — ${rows.length} events (${reason})` })
+  );
+  form.append("files[0]", new Blob([content], { type: "application/x-ndjson" }), filename);
+
+  try {
+    const res = await fetchImpl(webhookUrl, { method: "POST", body: form });
+    if (!res.ok) throw new Error(`${res.status} ${await res.text()}`);
+    return { ok: true };
+  } catch (e) {
+    console.error("Log flush failed:", e.message);
+    return { ok: false, error: e.message };
+  }
+}

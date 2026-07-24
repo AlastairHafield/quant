@@ -23,6 +23,7 @@ import { SessionRiskManager, checkDataHealth, checkRecalcSettle, computeSizeMult
 import { startStatusReporter } from "./statusReporter.js";
 import { SignalLogger, buildLogRow } from "./logger.js";
 import { postDiscordEmbed, buildTradeTakenEmbed, flushLogBufferToDiscord } from "./discord.js";
+import { updateMfeMae } from "./positionTracking.js";
 import * as topstepx from "./dataSources/topstepx.js";
 import * as flashalpha from "./dataSources/flashalpha.js";
 
@@ -42,6 +43,15 @@ export function orbWindowBounds(config) {
 export function isWithinOrbWindow(t, bounds) {
   const m = minutesOf(t);
   return m >= bounds.startMin && m < bounds.endMin;
+}
+
+// Returns the day-key to flush for if it's at/past the scheduled flush time and
+// that day hasn't been flushed yet, else null — pure, so the "is it time" logic is
+// testable separately from the setInterval wiring that calls it.
+export function shouldFlushLogNow(t, logFlushET, lastFlushedDay) {
+  const dayKey = t.toDateString();
+  const isFlushTime = minutesOf(t) >= logFlushET.h * 60 + logFlushET.m;
+  return isFlushTime && lastFlushedDay !== dayKey ? dayKey : null;
 }
 
 export function updateOrbRange(current, bar) {
@@ -108,6 +118,7 @@ export class Worker {
     this.account = null;
     this.openPositions = [];
     this.accountAsOf = null;
+    this.trackedTrades = []; // locally-tracked open trades, for MFE/MAE + closure detection
   }
 
   async pollAccount() {
@@ -116,6 +127,43 @@ export class Worker {
     this.account = account;
     this.openPositions = positions;
     this.accountAsOf = new Date();
+    this.detectClosedTrades();
+  }
+
+  // The broker no longer reporting a position for a contract we're tracking means
+  // it closed (stop or target filled) — there's no other live signal for this given
+  // we're polling REST rather than trusting the unverified user-hub push stream.
+  // Exit price is approximated as the last known bar close (detection lag up to the
+  // 5s poll interval) — good enough for MFE/MAE, not exact realized P&L.
+  detectClosedTrades() {
+    const stillOpenContractIds = new Set(this.openPositions.map((p) => p.contractId));
+    const remaining = [];
+    for (const trade of this.trackedTrades) {
+      if (stillOpenContractIds.has(trade.contractId)) {
+        remaining.push(trade);
+      } else {
+        this.logClosedTrade(trade);
+      }
+    }
+    this.trackedTrades = remaining;
+  }
+
+  logClosedTrade(trade) {
+    const lastBar = this.bars.length ? this.bars[this.bars.length - 1] : null;
+    const approxExitPrice = lastBar?.close ?? null;
+    const row = buildLogRow({
+      ts: new Date().toISOString(),
+      strategy: trade.strategy,
+      direction: trade.direction,
+      entryPrice: trade.entryPrice,
+      stopPrice: trade.stopPrice,
+      targetPrice: trade.targetPrice,
+      outcome: "closed",
+      mfe: trade.mfe,
+      mae: trade.mae,
+    });
+    row.approx_exit_price = approxExitPrice; // not part of the base schema, tacked on for this analysis
+    this.logger.log(row);
   }
 
   rebuildLevels() {
@@ -165,6 +213,10 @@ export class Worker {
     const delta = rawBar.buyVolume - rawBar.sellVolume;
     const bar = { ...rawBar, delta, cumDelta: prevCum + delta };
     this.bars.push(bar);
+
+    for (const trade of this.trackedTrades) {
+      Object.assign(trade, updateMfeMae(trade, trade.entryPrice, trade.direction, bar));
+    }
 
     if (isWithinOrbWindow(t, orbWindowBounds(CONFIG))) {
       Object.assign(this, updateOrbRange(this, bar));
@@ -396,6 +448,22 @@ export class Worker {
         tickSize: topstepx.tickSizeFor(CONFIG.instrumentTrade),
         customTag: `gex-${result.strategy}-${result.direction}-${Date.now()}`,
       });
+      // Tracked only once there's a real position to eventually detect the close
+      // of — MFE/MAE and closure detection both depend on polling a real broker
+      // position, which doesn't exist in signal-only mode.
+      this.trackedTrades.push({
+        strategy: result.strategy,
+        direction: result.direction,
+        entryPrice: result.entryPrice,
+        stopPrice: result.stopPrice,
+        targetPrice: result.targetPrice,
+        contractId,
+        size,
+        orderId,
+        mfe: 0,
+        mae: 0,
+        openedAt: new Date().toISOString(),
+      });
     } else {
       console.log(
         `[EXECUTION-DISABLED] would place ${result.direction} ${size}x Strategy ${result.strategy} @ ${result.entryPrice}`
@@ -453,6 +521,16 @@ async function startWorker() {
     5000
   );
   await topstepx.subscribeBars(CONFIG.instrumentData, (bar) => worker.onBar(bar));
+
+  let lastFlushedDay = null;
+  setInterval(() => {
+    const dayKey = shouldFlushLogNow(nowET(), CONFIG.logFlushET, lastFlushedDay);
+    if (!dayKey) return;
+    lastFlushedDay = dayKey;
+    flushLogBufferToDiscord(CONFIG.discord.logWebhook, worker.logger.drain(), dayKey, "scheduled").catch((e) =>
+      console.error("Scheduled log flush failed:", e.message)
+    );
+  }, 60_000);
 
   process.on("SIGTERM", async () => {
     const rows = worker.logger.drain();

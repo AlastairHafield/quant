@@ -8,6 +8,7 @@ export const CONFIG = {
   sessionOpenET: { h: 9, m: 30 },
   tradingCutoffET: { h: 15, m: 30 },
   sessionEndET: { h: 16, m: 0 },
+  logFlushET: { h: 16, m: 5 }, // dump the day's structured log to Discord once, shortly after close
 
   orbWindowMin: 15,
   maxConsecLosses: 2,
