@@ -65,6 +65,32 @@ export function updateOrbRange(current, bar) {
   };
 }
 
+// ProjectX Gateway position type: 1 = Long, 2 = Short — confirmed live
+// 2026-07-24 by cross-checking a position's type against the direction of
+// the signal that opened it.
+export const POSITION_TYPE_TO_DIRECTION = { 1: "long", 2: "short" };
+
+// Broker-reported positions with no matching contractId in trackedTrades —
+// either a fresh restart (see reconcileUntrackedPositions) or a position this
+// process never placed itself. Skips anything with an unrecognized type
+// rather than guess a direction.
+export function untrackedPositions(openPositions, trackedTrades) {
+  const trackedContractIds = new Set(trackedTrades.map((t) => t.contractId));
+  return openPositions.filter((p) => !trackedContractIds.has(p.contractId) && POSITION_TYPE_TO_DIRECTION[p.type]);
+}
+
+// A contract only ever has one real net position at the broker, so flipping
+// direction requires closing EVERY currently tracked trade on that contract,
+// not just the literal opposite-direction one — even a same-direction trade
+// would get wiped out by the same close call, so it has to come off our own
+// tracking too. Returns [] (nothing to close) when every tracked trade on
+// this contract already agrees with newDirection.
+export function tradesRequiringCloseOnFlip(trackedTrades, contractId, newDirection) {
+  const contractTrades = trackedTrades.filter((t) => t.contractId === contractId);
+  const flipping = contractTrades.some((t) => t.direction !== newDirection);
+  return flipping ? contractTrades : [];
+}
+
 // Reduces already-fetched historical bars (real UTC timestamps) down to the
 // high/low of whatever ET calendar day + window they actually fall in — the
 // pure half of backfillOrbIfPastWindow, split out so it's testable without a
@@ -153,6 +179,34 @@ export class Worker {
     this.openPositions = positions;
     this.accountAsOf = new Date();
     this.detectClosedTrades();
+    this.reconcileUntrackedPositions();
+  }
+
+  // trackedTrades only ever exists in this process's memory, built up as
+  // executeSignal places real orders — a worker restart wipes it even though
+  // the broker-side position is still there (caught live 2026-07-24 in the
+  // same incident as closeOnDirectionFlip below: a restart right after a real
+  // fill would make that fix blind to the position it most needs to protect,
+  // reproducing the hedging risk via a different path). Best-effort: entry
+  // price and direction come straight from the broker, but stop/target and
+  // any MFE/MAE accrued before the restart can't be recovered, so those start
+  // over from this reconciliation point.
+  reconcileUntrackedPositions() {
+    for (const pos of untrackedPositions(this.openPositions, this.trackedTrades)) {
+      this.trackedTrades.push({
+        strategy: "reconciled",
+        direction: POSITION_TYPE_TO_DIRECTION[pos.type],
+        entryPrice: pos.averagePrice,
+        stopPrice: null,
+        targetPrice: null,
+        contractId: pos.contractId,
+        size: pos.size,
+        orderId: null,
+        mfe: 0,
+        mae: 0,
+        openedAt: new Date().toISOString(),
+      });
+    }
   }
 
   // The broker no longer reporting a position for a contract we're tracking means
@@ -486,12 +540,31 @@ export class Worker {
   // conditions like failed-breakout/divergence/absorption). Those are built and
   // tested as pure functions but not wired into a live position-management loop.
   // The position runs on its fixed bracket until stop or target fills.
+  // Never hold opposite-direction exposure on the same contract at once —
+  // hedging isn't allowed on this account. Strategy A and B can legitimately
+  // both be long (or both short) at once, that's untouched; but a live SHORT
+  // immediately followed by an opposite LONG signal used to just fire a
+  // second bracket order on top of the first. The two market legs net flat
+  // at the broker, but each trade's own stop/target bracket doesn't cancel
+  // just because a *different* order zeroed the net position — both stayed
+  // resting, and one filled on its own a minute later, leaving a naked,
+  // untracked position with no stop or target (caught live 2026-07-24,
+  // manually flattened).
+  async closeOnDirectionFlip(accountId, contractId, newDirection) {
+    const toClose = tradesRequiringCloseOnFlip(this.trackedTrades, contractId, newDirection);
+    if (!toClose.length) return;
+    await topstepx.closePositionAndCancelOrders(accountId, contractId);
+    for (const trade of toClose) this.logClosedTrade(trade);
+    this.trackedTrades = this.trackedTrades.filter((t) => t.contractId !== contractId);
+  }
+
   async executeSignal(result, regimeInfo, flow, size) {
     let orderId = null;
 
     if (CONFIG.executionEnabled) {
       const accountId = await topstepx.resolveAccountId();
       const contractId = await topstepx.resolveFrontMonthContractId(CONFIG.instrumentTrade);
+      await this.closeOnDirectionFlip(accountId, contractId, result.direction);
       // Throws on a broker rejection (bad size/ticks/etc) — nothing below runs,
       // so a rejected order leaves trackedTrades/day-state untouched and a
       // legitimate retry later today isn't permanently blocked.

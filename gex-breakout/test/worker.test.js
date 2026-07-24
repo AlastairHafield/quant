@@ -6,6 +6,8 @@ import {
   isWithinOrbWindow,
   updateOrbRange,
   computeOrbFromHistoricalBars,
+  tradesRequiringCloseOnFlip,
+  untrackedPositions,
   shiftWalls,
   buildLevelState,
   shouldFlushLogNow,
@@ -63,6 +65,55 @@ test("computeOrbFromHistoricalBars: null when no bars fall in the day+window", (
   const bounds = { startMin: 570, endMin: 585 };
   const bars = [{ high: 5510, low: 5505, timestamp: new Date(2026, 6, 24, 10, 0) }];
   assert.equal(computeOrbFromHistoricalBars(bars, new Date(2026, 6, 24).toDateString(), bounds, identityToET), null);
+});
+
+test("tradesRequiringCloseOnFlip: empty when no tracked trades exist for the contract", () => {
+  assert.deepEqual(tradesRequiringCloseOnFlip([], "CON.F.US.MES.U26", "long"), []);
+});
+
+test("tradesRequiringCloseOnFlip: empty when every tracked trade on the contract already agrees with the new direction", () => {
+  const trades = [
+    { contractId: "CON.F.US.MES.U26", direction: "long", strategy: "A" },
+    { contractId: "CON.F.US.MES.U26", direction: "long", strategy: "B" },
+  ];
+  assert.deepEqual(tradesRequiringCloseOnFlip(trades, "CON.F.US.MES.U26", "long"), []);
+});
+
+test("tradesRequiringCloseOnFlip: ignores trades on other contracts", () => {
+  const trades = [{ contractId: "CON.F.US.ES.U26", direction: "short", strategy: "A" }];
+  assert.deepEqual(tradesRequiringCloseOnFlip(trades, "CON.F.US.MES.U26", "long"), []);
+});
+
+test("tradesRequiringCloseOnFlip: returns every tracked trade on the contract (not just the opposite-direction one) once any of them conflicts — a contract has only one real net position", () => {
+  const trades = [
+    { contractId: "CON.F.US.MES.U26", direction: "short", strategy: "B" },
+    { contractId: "CON.F.US.MES.U26", direction: "long", strategy: "A" }, // agrees with the new signal, but still shares the same net position
+  ];
+  const toClose = tradesRequiringCloseOnFlip(trades, "CON.F.US.MES.U26", "long");
+  assert.equal(toClose.length, 2);
+  assert.deepEqual(toClose, trades);
+});
+
+test("untrackedPositions: returns broker positions with no matching trackedTrades entry, mapping type 1/2 to long/short", () => {
+  const openPositions = [
+    { contractId: "CON.F.US.MES.U26", type: 1, size: 2, averagePrice: 7489.25 }, // untracked
+    { contractId: "CON.F.US.ES.U26", type: 2, size: 1, averagePrice: 5500 }, // already tracked
+  ];
+  const trackedTrades = [{ contractId: "CON.F.US.ES.U26", direction: "short" }];
+  const result = untrackedPositions(openPositions, trackedTrades);
+  assert.equal(result.length, 1);
+  assert.equal(result[0].contractId, "CON.F.US.MES.U26");
+});
+
+test("untrackedPositions: skips positions with an unrecognized type rather than guess a direction", () => {
+  const openPositions = [{ contractId: "CON.F.US.MES.U26", type: 0, size: 1, averagePrice: 7489.25 }];
+  assert.deepEqual(untrackedPositions(openPositions, []), []);
+});
+
+test("untrackedPositions: empty when every open position is already tracked", () => {
+  const openPositions = [{ contractId: "CON.F.US.MES.U26", type: 1, size: 2, averagePrice: 7489.25 }];
+  const trackedTrades = [{ contractId: "CON.F.US.MES.U26", direction: "long" }];
+  assert.deepEqual(untrackedPositions(openPositions, trackedTrades), []);
 });
 
 test("shiftWalls: shifts every wall's strike by the basis, preserving wallType/gex", () => {
