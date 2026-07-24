@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { buildSignalEmbed, postDiscordEmbed, flushLogBufferToDiscord } from "../src/discord.js";
+import { buildSignalEmbed, buildTradeTakenEmbed, postDiscordEmbed, flushLogBufferToDiscord } from "../src/discord.js";
 
 test("buildSignalEmbed: shapes an embed with inline fields and a footer", () => {
   const embed = buildSignalEmbed({
@@ -14,6 +14,50 @@ test("buildSignalEmbed: shapes an embed with inline fields and a footer", () => 
   assert.equal(embed.embeds[0].fields.length, 2);
   assert.deepEqual(embed.embeds[0].fields[0], { name: "Regime", value: "NEG_GAMMA", inline: true });
   assert.equal(embed.embeds[0].footer.text, "MES · signal-only");
+});
+
+test("buildTradeTakenEmbed: long trade shapes a green embed with entry/stop/target and reasoning fields", () => {
+  const embed = buildTradeTakenEmbed({
+    system: "GEX Breakout",
+    strategy: "A",
+    direction: "long",
+    size: 4,
+    entryPrice: 7462,
+    stopPrice: 7459,
+    targetPrice: 7480,
+    reasonFields: [["Regime", "NEG_GAMMA"], ["Flow grade", "A"]],
+    orderId: 9056,
+  });
+  const e = embed.embeds[0];
+  assert.match(e.title, /LONG/);
+  assert.match(e.title, /GEX Breakout/);
+  assert.match(e.title, /Strategy A/);
+  assert.match(e.description, /7462/);
+  assert.match(e.description, /7459/);
+  assert.match(e.description, /7480/);
+  assert.equal(e.color, 0x2ecc71);
+  assert.ok(e.fields.some((f) => f.name === "Regime" && f.value === "NEG_GAMMA"));
+  assert.ok(e.fields.some((f) => f.name === "Order ID" && f.value === "9056"));
+});
+
+test("buildTradeTakenEmbed: short trade is red and omits the strategy suffix when not given", () => {
+  const embed = buildTradeTakenEmbed({
+    system: "Mechanical ORB",
+    strategy: null,
+    direction: "short",
+    size: 1,
+    entryPrice: 7460,
+    stopPrice: 7466,
+    targetPrice: 7440,
+    reasonFields: [["ADX", "31.4"]],
+    orderId: null,
+  });
+  const e = embed.embeds[0];
+  assert.match(e.title, /SHORT/);
+  assert.match(e.title, /Mechanical ORB/);
+  assert.doesNotMatch(e.title, /Strategy/);
+  assert.equal(e.color, 0xe74c3c);
+  assert.ok(e.fields.some((f) => f.name === "Order ID" && f.value === "—"));
 });
 
 test("postDiscordEmbed: skips the network call entirely when no webhook is configured", async () => {

@@ -1,0 +1,51 @@
+export const CONFIG = {
+  instrument: process.env.INSTRUMENT || "MES",
+  tickSize: 0.25,
+
+  sessionOpenET: { h: 9, m: 30 },
+  orWindowMin: 15,
+  entryCutoffET: { h: 12, m: 0 },
+  flattenAtET: { h: 15, m: 55 }, // a few minutes before the 16:00 close, to ensure the fill lands in RTH
+
+  direction: "long", // validated LONG-only — SHORT loses outright, BOTH dilutes the edge (orb-alpaca-1m-findings)
+  triggerBufferPts: 0, // validated config used a plain CLOSE trigger, no extra buffer beyond the OR itself
+
+  stop: {
+    fracOfOrRange: 1.5, // stopDistance = 1.5 * (orHigh - orLow), placed below entry for a long
+  },
+
+  regime: {
+    adxPeriod: 14,
+    adxThreshold: 25, // prior-day ADX >= 25 required to arm the strategy that day
+    // Calendar days, not trading days — a 40-day request only yielded 27 trading
+    // days live (one short of adx(14)'s 28-bar minimum). 75 calendar days comfortably
+    // clears ~50 trading days even accounting for weekends/holidays, giving the ADX
+    // series real room to stabilize past the bare minimum.
+    dailyLookbackDays: 75,
+  },
+
+  sizing: {
+    mode: "FLAT", // "FLAT" | "LADDER" — pinned to FLAT for this practice-account monitoring run
+    flatContracts: 1,
+    ladder: {
+      // Reusable for the eventual real-money phase (topstep-prop-firm-plan): start
+      // at 1 contract, +1 per $2,000 of equity growth, capped at 15. Not active
+      // while sizing.mode is "FLAT".
+      baseContracts: 1,
+      perContractEquityStep: 2000,
+      startingEquity: 2000,
+      cap: 15,
+    },
+  },
+
+  accountNameHint: process.env.MECHANICAL_ORB_ACCOUNT_NAME || null,
+
+  discord: {
+    webhook: process.env.DISCORD_WEBHOOK || null,
+  },
+
+  backendUrl: process.env.BACKEND_URL || "http://localhost:3001",
+  statusSecret: process.env.MECHANICAL_ORB_STATUS_SECRET || null,
+
+  executionEnabled: process.env.MECHANICAL_ORB_EXECUTION_ENABLED === "true",
+};

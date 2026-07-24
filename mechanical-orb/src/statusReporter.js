@@ -4,29 +4,13 @@ export function buildStatusPayload(worker) {
   const lastBar = worker.bars.length ? worker.bars[worker.bars.length - 1] : null;
   return {
     signalOnly: !CONFIG.executionEnabled,
-    instrumentTrade: CONFIG.instrumentTrade,
-    instrumentData: CONFIG.instrumentData,
+    instrument: CONFIG.instrument,
     lastPrice: lastBar?.close ?? null,
     barsToday: worker.bars.length,
-    regime: worker.lastRegimeInfo?.regime ?? null,
-    gex: worker.gexSnapshot
-      ? {
-          netGex: worker.gexSnapshot.netGex,
-          confidence: worker.gexSnapshot.confidence,
-          asOf: worker.gexSnapshot.asOf,
-        }
-      : null,
-    flipPointEs: worker.levelState.flipPointEs,
-    wallsEs: worker.levelState.wallsEs,
-    basis: worker.basis,
-    basisAsOf: worker.basisAsOf ? worker.basisAsOf.toISOString() : null,
     orb: { high: worker.orbHigh, low: worker.orbLow, locked: worker.orbLocked },
-    dayState: {
-      orbTradedDirections: [...worker.riskManager.dayState.orbTradedDirections],
-      strategyBTradesToday: worker.riskManager.dayState.strategyBTradesToday,
-      consecutiveLosses: worker.riskManager.consecutiveLosses,
-      haltedForDay: worker.riskManager.haltedForDay,
-    },
+    adx: worker.priorDayAdx,
+    adxOk: worker.priorDayAdxOk,
+    tradedToday: worker.dayState.tradedToday,
     account: worker.account
       ? { id: worker.account.id, name: worker.account.name, balance: worker.account.balance }
       : null,
@@ -41,7 +25,7 @@ export async function pushStatus(worker, backendUrl, secret, fetchImpl = fetch) 
   const headers = { "Content-Type": "application/json" };
   if (secret) headers["X-Status-Secret"] = secret;
   try {
-    const res = await fetchImpl(`${backendUrl}/api/gex-breakout/status`, {
+    const res = await fetchImpl(`${backendUrl}/api/mechanical-orb/status`, {
       method: "POST",
       headers,
       body: JSON.stringify(buildStatusPayload(worker)),

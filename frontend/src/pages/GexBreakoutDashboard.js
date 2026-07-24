@@ -111,6 +111,12 @@ export default function GexBreakoutDashboard() {
             {status.orb.locked ? `${r(status.orb.high)} / ${r(status.orb.low)}` : 'forming...'}
           </div>
         </div>
+        <div className="metric">
+          <div className="metric-label">Account Balance</div>
+          <div className="metric-value" style={{ fontSize: 16 }}>
+            {status.account ? '$' + status.account.balance.toLocaleString() : '—'}
+          </div>
+        </div>
       </div>
 
       <div className="two-col">
@@ -130,6 +136,37 @@ export default function GexBreakoutDashboard() {
           <div style={{ height: 10 }} />
           <WallList label="Below spot" walls={status.wallsEs?.belowSpot} />
         </div>
+      </div>
+
+      <div className="card">
+        <p className="card-title">
+          Account — {status.account?.name ?? '—'} · Open Positions ({status.openPositions?.length ?? 0})
+        </p>
+        {!status.openPositions?.length ? (
+          <div className="empty">Flat — no open positions.</div>
+        ) : (
+          <div className="table-wrap">
+            <table>
+              <thead>
+                <tr><th>Contract</th><th>Side</th><th>Size</th><th>Avg Price</th></tr>
+              </thead>
+              <tbody>
+                {status.openPositions.map((p) => (
+                  <tr key={p.id}>
+                    <td style={{ fontFamily: 'var(--mono)', fontSize: 11 }}>{p.contractId}</td>
+                    <td>
+                      <span className={p.type === 1 ? 'tag-long' : p.type === 2 ? 'tag-short' : ''}>
+                        {p.type === 1 ? 'LONG' : p.type === 2 ? 'SHORT' : `type ${p.type}`}
+                      </span>
+                    </td>
+                    <td style={{ fontFamily: 'var(--mono)', fontSize: 11 }}>{p.size}</td>
+                    <td style={{ fontFamily: 'var(--mono)', fontSize: 11 }}>{r(p.averagePrice)}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        )}
       </div>
 
       <div className="card">

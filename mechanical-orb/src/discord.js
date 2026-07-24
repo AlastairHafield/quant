@@ -13,15 +13,12 @@ export function buildSignalEmbed({ title, description, color, fields, footerText
   };
 }
 
-// A trade actually placed (vs. buildSignalEmbed's signal-only notice) — includes
-// the reasoning (regime, flow grade, trigger level, etc.) as extra fields so a
-// glance at Discord explains why the order went out, not just what it was.
 export function buildTradeTakenEmbed({ system, strategy, direction, size, entryPrice, stopPrice, targetPrice, reasonFields, orderId }) {
   const dirLabel = direction === "long" ? "LONG" : "SHORT";
   const color = direction === "long" ? 0x2ecc71 : 0xe74c3c;
   return buildSignalEmbed({
     title: `${direction === "long" ? "🟢" : "🔴"} ${dirLabel} ${size}x — ${system}${strategy ? ` · Strategy ${strategy}` : ""}`,
-    description: `Entry **${entryPrice}** / Stop **${stopPrice}** / Target **${targetPrice}**`,
+    description: `Entry **${entryPrice}** / Stop **${stopPrice}** / Target **${targetPrice ?? "ride to EOD"}**`,
     color,
     fields: [...reasonFields, ["Order ID", orderId ?? "—"]],
     footerText: `${system} · live order · ${new Date().toISOString()}`,
@@ -43,26 +40,4 @@ export async function postDiscordEmbed(webhookUrl, embedPayload, fetchImpl = fet
     return { ok: false, status: res.status };
   }
   return { ok: true };
-}
-
-export async function flushLogBufferToDiscord(webhookUrl, rows, day, reason, fetchImpl = fetch) {
-  if (!rows.length || !webhookUrl) return { skipped: true };
-
-  const filename = `gex-breakout-log-${day}.jsonl`;
-  const content = rows.map((r) => JSON.stringify(r)).join("\n");
-  const form = new FormData();
-  form.append(
-    "payload_json",
-    JSON.stringify({ content: `Session log **${day}** — ${rows.length} events (${reason})` })
-  );
-  form.append("files[0]", new Blob([content], { type: "application/x-ndjson" }), filename);
-
-  try {
-    const res = await fetchImpl(webhookUrl, { method: "POST", body: form });
-    if (!res.ok) throw new Error(`${res.status} ${await res.text()}`);
-    return { ok: true };
-  } catch (e) {
-    console.error("Log flush failed:", e.message);
-    return { ok: false, error: e.message };
-  }
 }

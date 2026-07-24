@@ -21,6 +21,21 @@ test("buildStatusPayload: sane defaults before any data has arrived", () => {
     haltedForDay: false,
   });
   assert.deepEqual(payload.recentLog, []);
+  assert.equal(payload.account, null);
+  assert.deepEqual(payload.openPositions, []);
+  assert.equal(payload.accountAsOf, null);
+});
+
+test("buildStatusPayload: reflects live account balance/positions once polled", () => {
+  const worker = createWorker();
+  worker.account = { id: 25804787, name: "PRAC-V2-416538-98727790", balance: 150000, canTrade: true };
+  worker.openPositions = [{ id: 1, contractId: "CON.F.US.MES.U26", size: 4, averagePrice: 7462, type: 1 }];
+  worker.accountAsOf = new Date("2026-07-24T14:00:00Z");
+
+  const payload = buildStatusPayload(worker);
+  assert.deepEqual(payload.account, { id: 25804787, name: "PRAC-V2-416538-98727790", balance: 150000 });
+  assert.equal(payload.openPositions.length, 1);
+  assert.equal(payload.accountAsOf, "2026-07-24T14:00:00.000Z");
 });
 
 test("buildStatusPayload: reflects live GEX/basis/regime/day-state once populated", () => {

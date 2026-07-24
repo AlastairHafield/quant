@@ -1,0 +1,220 @@
+import { pathToFileURL } from "node:url";
+import { CONFIG } from "./config.js";
+import { priorDayAdxOk } from "./adx.js";
+import {
+  orbWindowBounds,
+  isWithinOrbWindow,
+  updateOrbRange,
+  evaluateEntry,
+  shouldFlattenNow,
+  minutesOf,
+} from "./strategy.js";
+import { computeSize } from "./sizing.js";
+import { SignalLogger, buildLogRow } from "./logger.js";
+import { buildSignalEmbed, buildTradeTakenEmbed, postDiscordEmbed } from "./discord.js";
+import { startStatusReporter } from "./statusReporter.js";
+import * as topstepx from "./dataSources/topstepx.js";
+
+export function nowET() {
+  return new Date(new Date().toLocaleString("en-US", { timeZone: "America/New_York" }));
+}
+
+export class Worker {
+  constructor() {
+    this.logger = new SignalLogger();
+    this.bars = [];
+    this.orbHigh = null;
+    this.orbLow = null;
+    this.orbLocked = false;
+    this.priorDayAdx = null;
+    this.priorDayAdxOk = false;
+    this.dayState = { tradedToday: false };
+    this.currentDay = null;
+    this.openPosition = null; // { direction, entryPrice, stopPrice, size, contractId }
+    this.account = null;
+    this.openPositions = [];
+    this.accountAsOf = null;
+  }
+
+  async refreshAdx() {
+    const dailyBars = await topstepx.fetchDailyBars(CONFIG.instrument, CONFIG.regime.dailyLookbackDays);
+    const result = priorDayAdxOk(dailyBars, {
+      adxPeriod: CONFIG.regime.adxPeriod,
+      adxThreshold: CONFIG.regime.adxThreshold,
+    });
+    this.priorDayAdx = result.adx;
+    this.priorDayAdxOk = result.ok;
+  }
+
+  async pollAccount() {
+    const accountId = await topstepx.resolveAccountId();
+    const { account, positions } = await topstepx.fetchAccountSnapshot(accountId);
+    this.account = account;
+    this.openPositions = positions;
+    this.accountAsOf = new Date();
+  }
+
+  checkDayRollover(t) {
+    const dayKey = t.toDateString();
+    if (this.currentDay === dayKey) return;
+    this.currentDay = dayKey;
+    this.orbHigh = null;
+    this.orbLow = null;
+    this.orbLocked = false;
+    this.dayState = { tradedToday: false };
+    this.refreshAdx().catch((e) => console.error("ADX refresh failed:", e.message));
+  }
+
+  onBar(rawBar, t = nowET()) {
+    this.checkDayRollover(t);
+    this.bars.push(rawBar);
+
+    if (isWithinOrbWindow(t, orbWindowBounds(CONFIG))) {
+      Object.assign(this, updateOrbRange(this, rawBar));
+      return;
+    }
+    if (!this.orbLocked && this.orbHigh != null) {
+      this.orbLocked = true;
+    }
+    if (!this.orbLocked) return;
+
+    if (this.openPosition && shouldFlattenNow(t, CONFIG)) {
+      this.flatten(rawBar.close).catch((e) => console.error("EOD flatten failed:", e.message));
+      return;
+    }
+    if (this.openPosition) return; // one trade at a time, nothing else to evaluate
+
+    const result = evaluateEntry({
+      bar: rawBar,
+      orbHigh: this.orbHigh,
+      orbLow: this.orbLow,
+      nowET: t,
+      adxOk: this.priorDayAdxOk,
+      config: CONFIG,
+      dayState: this.dayState,
+    });
+    if (!result) return;
+
+    this.handleSignal(result);
+  }
+
+  handleSignal(result) {
+    const row = buildLogRow({
+      ts: new Date().toISOString(),
+      direction: result.direction,
+      adx: this.priorDayAdx,
+      orbHigh: this.orbHigh,
+      orbLow: this.orbLow,
+      vetoReason: result.veto,
+      entryPrice: result.entryPrice,
+      stopPrice: result.stopPrice,
+    });
+    this.logger.log(row);
+
+    if (result.veto) {
+      postDiscordEmbed(
+        CONFIG.discord.webhook,
+        buildSignalEmbed({
+          title: `⚪ VETOED — Mechanical ORB (${result.veto})`,
+          description: `Breakout ${result.direction} beyond ORB high, not taken.`,
+          color: 0x95a5a6,
+          fields: [
+            ["ADX", this.priorDayAdx?.toFixed(1) ?? "n/a"],
+            ["ORB", `${this.orbHigh?.toFixed(2)} / ${this.orbLow?.toFixed(2)}`],
+          ],
+          footerText: `Mechanical ORB · ${new Date().toISOString()}`,
+        })
+      ).catch((e) => console.error("Discord post failed:", e.message));
+      return;
+    }
+
+    this.dayState.tradedToday = true;
+    this.executeEntry(result).catch((e) => console.error("Entry execution failed:", e.message));
+  }
+
+  async executeEntry(result) {
+    const size = computeSize(CONFIG, this.account?.balance ?? CONFIG.sizing.ladder.startingEquity);
+    let orderId = null;
+    let contractId = null;
+
+    if (CONFIG.executionEnabled) {
+      const accountId = await topstepx.resolveAccountId();
+      contractId = await topstepx.resolveFrontMonthContractId(CONFIG.instrument);
+      orderId = await topstepx.placeStopOnlyOrder({
+        accountId,
+        contractId,
+        direction: result.direction,
+        size,
+        entryPrice: result.entryPrice,
+        stopPrice: result.stopPrice,
+        tickSize: CONFIG.tickSize,
+        customTag: `morb-${result.direction}-${Date.now()}`,
+      });
+    } else {
+      console.log(`[EXECUTION-DISABLED] would place ${result.direction} ${size}x @ ${result.entryPrice}`);
+    }
+
+    // Tracked regardless of execution mode — the "one trade per day" guard in
+    // onBar() depends on this being set even in signal-only mode, otherwise every
+    // subsequent qualifying bar re-evaluates and spams an "already traded" veto.
+    this.openPosition = { ...result, size, contractId };
+
+    await postDiscordEmbed(
+      CONFIG.discord.webhook,
+      buildTradeTakenEmbed({
+        system: "Mechanical ORB",
+        strategy: null,
+        direction: result.direction,
+        size,
+        entryPrice: result.entryPrice,
+        stopPrice: result.stopPrice,
+        targetPrice: null,
+        reasonFields: [
+          ["ADX", this.priorDayAdx?.toFixed(1) ?? "n/a"],
+          ["ORB high/low", `${this.orbHigh?.toFixed(2)} / ${this.orbLow?.toFixed(2)}`],
+          ["Mode", CONFIG.executionEnabled ? "LIVE" : "SIGNAL-ONLY"],
+        ],
+        orderId,
+      })
+    );
+  }
+
+  async flatten(lastPrice) {
+    if (!this.openPosition) return;
+    if (CONFIG.executionEnabled) {
+      const accountId = await topstepx.resolveAccountId();
+      await topstepx.closePositionAndCancelOrders(accountId, this.openPosition.contractId);
+    }
+    console.log(`Flattening EOD: ${this.openPosition.direction} @ ~${lastPrice}`);
+    this.openPosition = null;
+  }
+}
+
+export function createWorker() {
+  return new Worker();
+}
+
+async function startWorker() {
+  const worker = createWorker();
+  console.log(`mechanical-orb worker starting — signal-only mode: ${!CONFIG.executionEnabled}`);
+
+  startStatusReporter(worker, {
+    backendUrl: CONFIG.backendUrl,
+    secret: CONFIG.statusSecret,
+    intervalMs: 3000,
+  });
+
+  worker.checkDayRollover(nowET());
+  worker.pollAccount().catch((e) => console.error("Initial account poll failed:", e.message));
+
+  setInterval(() => worker.pollAccount().catch((e) => console.error("Account poll failed:", e.message)), 5000);
+
+  await topstepx.subscribeBars(CONFIG.instrument, (bar) => worker.onBar(bar));
+
+  process.on("SIGTERM", () => process.exit(0));
+}
+
+const isMain = process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href;
+if (isMain) {
+  startWorker();
+}

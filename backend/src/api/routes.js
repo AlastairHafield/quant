@@ -8,6 +8,7 @@ import { runORBBacktest, runORBSweep } from '../engine/orbBacktest.js';
 import { parsePineScriptParams } from '../engine/parsePineScript.js';
 import { getBacktestRuns, getBacktestTrades, getEarningsEvents, removeStock, getSDRuns, getSDTrades, getMRRuns, getMRRun, getMRTrades, getMRSweep, getORBRuns, getORBRun, getORBTrades, getORBSweep } from '../data/db.js';
 import { setGexBreakoutStatus, getGexBreakoutStatus } from '../data/gexBreakoutStatus.js';
+import { setMechanicalOrbStatus, getMechanicalOrbStatus } from '../data/mechanicalOrbStatus.js';
 
 const router = express.Router();
 
@@ -356,6 +357,23 @@ router.post('/gex-breakout/status', (req, res) => {
 
 router.get('/gex-breakout/status', (req, res) => {
   const status = getGexBreakoutStatus();
+  if (!status) return res.status(404).json({ success: false, error: 'no status reported yet' });
+  res.json({ success: true, data: status });
+});
+
+// === MECHANICAL ORB (same relay pattern as GEX Breakout above) ===
+
+router.post('/mechanical-orb/status', (req, res) => {
+  const expected = process.env.MECHANICAL_ORB_STATUS_SECRET;
+  if (expected && req.headers['x-status-secret'] !== expected) {
+    return res.status(401).json({ success: false, error: 'invalid status secret' });
+  }
+  setMechanicalOrbStatus(req.body);
+  res.json({ success: true });
+});
+
+router.get('/mechanical-orb/status', (req, res) => {
+  const status = getMechanicalOrbStatus();
   if (!status) return res.status(404).json({ success: false, error: 'no status reported yet' });
   res.json({ success: true, data: status });
 });

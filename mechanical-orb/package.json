@@ -1,9 +1,9 @@
 {
-  "name": "gex-breakout",
+  "name": "mechanical-orb",
   "version": "1.0.0",
   "private": true,
   "type": "module",
-  "description": "MES breakout system: GEX regime + ES order flow confirmed ORB/breakout signals, forward-test only",
+  "description": "Validated 15-min ORB strategy (orb-alpaca-1m-findings): MES, LONG only, 1-min CLOSE trigger, ADX-filtered — live at flat 1 contract for monitoring",
   "engines": {
     "node": "20.x"
   },

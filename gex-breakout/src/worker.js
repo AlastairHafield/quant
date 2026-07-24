@@ -1,4 +1,3 @@
-import "dotenv/config";
 import { pathToFileURL } from "node:url";
 import { CONFIG } from "./config.js";
 import { computeGexSnapshotFromProfile } from "./gexEngine.js";
@@ -23,7 +22,7 @@ import {
 import { SessionRiskManager, checkDataHealth, checkRecalcSettle, computeSizeMultiplier } from "./riskSession.js";
 import { startStatusReporter } from "./statusReporter.js";
 import { SignalLogger, buildLogRow } from "./logger.js";
-import { postDiscordEmbed, buildSignalEmbed, flushLogBufferToDiscord } from "./discord.js";
+import { postDiscordEmbed, buildTradeTakenEmbed, flushLogBufferToDiscord } from "./discord.js";
 import * as topstepx from "./dataSources/topstepx.js";
 import * as flashalpha from "./dataSources/flashalpha.js";
 
@@ -106,6 +105,17 @@ export class Worker {
     this.pendingA = null;
     this.pendingB = null;
     this.lastRegimeInfo = null;
+    this.account = null;
+    this.openPositions = [];
+    this.accountAsOf = null;
+  }
+
+  async pollAccount() {
+    const accountId = await topstepx.resolveAccountId();
+    const { account, positions } = await topstepx.fetchAccountSnapshot(accountId);
+    this.account = account;
+    this.openPositions = positions;
+    this.accountAsOf = new Date();
   }
 
   rebuildLevels() {
@@ -355,27 +365,60 @@ export class Worker {
     });
     this.logger.log(row);
 
-    if (result.veto) return; // signal-only mode: vetoes are logged only, no alert noise
+    if (result.veto) return; // vetoes are logged only, no alert noise
 
-    const sizeMultiplier = computeSizeMultiplier(flow.grade, result.sizeMultiplier, CONFIG.risk.sizing);
-    const embed = buildSignalEmbed({
-      title: `${result.direction === "long" ? "LONG" : "SHORT"} — Strategy ${result.strategy}`,
-      description: `Entry ${result.entryPrice} / Stop ${result.stopPrice} / Target ${result.targetPrice} (${result.targetMode})`,
-      color: result.direction === "long" ? 0x2ecc71 : 0xe74c3c,
-      fields: [
-        ["Regime", regimeInfo.regime],
-        ["Flow grade", flow.grade],
-        ["Size", sizeMultiplier],
-      ],
-      footerText: `${CONFIG.instrumentTrade} · signal-only · ${new Date().toISOString()}`,
-    });
-    postDiscordEmbed(CONFIG.discord.signalWebhook, embed).catch((e) =>
-      console.error("Discord post failed:", e.message)
+    const size = computeSizeMultiplier(flow.grade, result.sizeMultiplier, CONFIG.risk.sizing);
+    this.executeSignal(result, regimeInfo, flow, size).catch((e) =>
+      console.error("Signal execution failed:", e.message)
     );
+  }
+
+  // NOTE: this places the entry with its static bracket (stop/target as computed
+  // at signal time) and stops there — it does not yet implement dynamic in-trade
+  // management (breakeven-at-1R, runner trailing, or exitRules.js's early-exit
+  // conditions like failed-breakout/divergence/absorption). Those are built and
+  // tested as pure functions but not wired into a live position-management loop.
+  // The position runs on its fixed bracket until stop or target fills.
+  async executeSignal(result, regimeInfo, flow, size) {
+    let orderId = null;
 
     if (CONFIG.executionEnabled) {
-      console.warn("EXECUTION_ENABLED is set but no execution layer exists yet — running signal-only regardless.");
+      const accountId = await topstepx.resolveAccountId();
+      const contractId = await topstepx.resolveFrontMonthContractId(CONFIG.instrumentTrade);
+      orderId = await topstepx.placeBracketOrder({
+        accountId,
+        contractId,
+        direction: result.direction,
+        size,
+        entryPrice: result.entryPrice,
+        stopPrice: result.stopPrice,
+        targetPrice: result.targetPrice,
+        tickSize: topstepx.tickSizeFor(CONFIG.instrumentTrade),
+        customTag: `gex-${result.strategy}-${result.direction}-${Date.now()}`,
+      });
+    } else {
+      console.log(
+        `[EXECUTION-DISABLED] would place ${result.direction} ${size}x Strategy ${result.strategy} @ ${result.entryPrice}`
+      );
     }
+
+    const embed = buildTradeTakenEmbed({
+      system: "GEX Breakout",
+      strategy: result.strategy,
+      direction: result.direction,
+      size,
+      entryPrice: result.entryPrice,
+      stopPrice: result.stopPrice,
+      targetPrice: result.targetPrice,
+      reasonFields: [
+        ["Regime", regimeInfo.regime],
+        ["Flow grade", flow.grade],
+        ["Target mode", result.targetMode],
+        ["Mode", CONFIG.executionEnabled ? "LIVE" : "SIGNAL-ONLY"],
+      ],
+      orderId,
+    });
+    await postDiscordEmbed(CONFIG.discord.signalWebhook, embed);
   }
 }
 
@@ -395,6 +438,7 @@ async function startWorker() {
 
   worker.recalcGex().catch((e) => console.error("Initial GEX recalc failed:", e.message));
   worker.recalcBasis().catch((e) => console.error("Initial basis recalc failed:", e.message));
+  worker.pollAccount().catch((e) => console.error("Initial account poll failed:", e.message));
 
   setInterval(
     () => worker.recalcGex().catch((e) => console.error("GEX recalc failed:", e.message)),
@@ -403,6 +447,10 @@ async function startWorker() {
   setInterval(
     () => worker.recalcBasis().catch((e) => console.error("Basis recalc failed:", e.message)),
     CONFIG.basisRecalcMin * 60_000
+  );
+  setInterval(
+    () => worker.pollAccount().catch((e) => console.error("Account poll failed:", e.message)),
+    5000
   );
   await topstepx.subscribeBars(CONFIG.instrumentData, (bar) => worker.onBar(bar));
 
