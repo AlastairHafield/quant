@@ -58,6 +58,22 @@ export function detectAbsorption(touchWindow, priorBars, levelPrice, direction, 
   return highVolume && stalledPrice;
 }
 
+// Slices the two windows detectAbsorption needs straight out of an open
+// trade's live bar history — the "touch" window (most recent bars) and a
+// baseline window before it for the average-volume comparison. Live bars
+// only carry buyVolume/sellVolume (see TradeBarAggregator in
+// dataSources/topstepx.js), not a combined volume field, so this also
+// derives that. Returns null when there isn't yet enough bar history since
+// entry to fill both windows — evaluateOpenTrades just skips the absorption
+// check for that bar rather than running it against a truncated window.
+export function buildAbsorptionWindow(bars, currentIndex, { touchBars, avgLookbackBars }) {
+  if (currentIndex - touchBars - avgLookbackBars + 1 < 0) return null;
+  const withVolume = (b) => ({ ...b, volume: (b.buyVolume ?? 0) + (b.sellVolume ?? 0) });
+  const touchWindow = bars.slice(currentIndex - touchBars + 1, currentIndex + 1).map(withVolume);
+  const priorBars = bars.slice(currentIndex - touchBars - avgLookbackBars + 1, currentIndex - touchBars + 1).map(withVolume);
+  return { touchWindow, priorBars };
+}
+
 export function gradeFlow({
   breakoutBar,
   confirmBar,

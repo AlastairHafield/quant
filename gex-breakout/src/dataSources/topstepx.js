@@ -103,6 +103,15 @@ export function tickSizeFor(symbolText) {
   return size;
 }
 
+// Live-verified 2026-07-24: a bracket stop rejected with "Invalid stop loss
+// ticks (-1). Price should be at least 4 ticks away." — found by testing
+// reopenAt's close+re-bracket mechanism for real (a dynamic-exit stop move
+// landing within 4 ticks of the re-entry reference price, e.g. breakeven
+// firing right as price is barely past 1R, would otherwise be silently
+// rejected). Callers computing a new stop price for a live reopen should
+// clamp to at least this distance from the reference price.
+export const MIN_STOP_TICKS = 4;
+
 // Real-UTC lookback window (not ET-relative — callers filter the returned
 // bars' own timestamps down to whatever ET window they actually need). Used
 // to backfill the opening-range high/low from history when a worker starts
@@ -292,6 +301,20 @@ export async function cancelOrder(accountId, orderId) {
   return apiPost("/api/Order/cancel", { accountId, orderId });
 }
 
+// Cancels every resting order on a contract WITHOUT touching the position
+// itself — distinct from closePositionAndCancelOrders below, which closes
+// the position too. Needed when re-bracketing a still-open (e.g. partially
+// reduced) position: the original stop/target orders were sized for the old
+// position size, and this broker's behavior when a bracket order is left
+// larger than the current position isn't something we've verified, so the
+// safe move is to cancel and replace rather than assume it's handled.
+export async function cancelOrdersOnContract(accountId, contractId) {
+  const openOrders = await searchOpenOrders(accountId);
+  const stragglers = openOrders.filter((o) => o.contractId === contractId);
+  await Promise.all(stragglers.map((o) => cancelOrder(accountId, o.id)));
+  return stragglers.map((o) => o.id);
+}
+
 // Live-verified 2026-07-24: closing a position does NOT cancel its bracket
 // child orders — after Position/closeContract, the stop-loss and take-profit
 // orders were still sitting as live working orders with no position behind them
@@ -300,10 +323,8 @@ export async function cancelOrder(accountId, orderId) {
 // open orders on the contract as part of closing it.
 export async function closePositionAndCancelOrders(accountId, contractId) {
   const closeResult = await apiPost("/api/Position/closeContract", { accountId, contractId });
-  const openOrders = await searchOpenOrders(accountId);
-  const stragglers = openOrders.filter((o) => o.contractId === contractId);
-  await Promise.all(stragglers.map((o) => cancelOrder(accountId, o.id)));
-  return { closeResult, canceledOrderIds: stragglers.map((o) => o.id) };
+  const canceledOrderIds = await cancelOrdersOnContract(accountId, contractId);
+  return { closeResult, canceledOrderIds };
 }
 
 // Balance + open positions for the dashboard's live account stats. Polling REST is

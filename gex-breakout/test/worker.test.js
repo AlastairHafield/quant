@@ -286,6 +286,42 @@ test("Worker: onBar updates MFE/MAE for every tracked trade as new bars arrive",
   assert.equal(worker.trackedTrades[0].mae, 20); // 5500-5480, new worse adverse excursion
 });
 
+test("Worker: evaluateOpenTrades dispatches a non-HOLD evaluateExit result (failed breakout) for a tracked trade", () => {
+  const worker = createWorker();
+  worker.onBar(esBar({ high: 5501, low: 5499, close: 5500, buyVolume: 50, sellVolume: 50 }), new Date(2026, 6, 24, 10, 0));
+  const entryIndex = worker.bars.length - 1;
+  worker.trackedTrades.push({
+    strategy: "A", direction: "long", entryPrice: 5500, stopPrice: 5490, originalStopPrice: 5490,
+    targetPrice: 5520, originalTargetPrice: 5520, brokenLevel: 5500, entryIndex, lastRegimeBase: "NEG_GAMMA",
+    movedToBreakeven: true, actionInFlight: false, contractId: "CON.F.US.EP.U26", size: 4, orderId: 1,
+    mfe: 0, mae: 0, openedAt: "t",
+  });
+
+  // Closes below brokenLevel(5500) - failedBreakoutPts(2) = 5498 -> EXIT_NOW.
+  // executionEnabled is false in tests, so the real broker call inside
+  // actOnExitResult rejects (no credentials) and is caught asynchronously —
+  // actionInFlight being true immediately after onBar (set synchronously,
+  // before that rejection settles) is exactly what proves evaluateOpenTrades
+  // correctly identified a non-HOLD result and dispatched it.
+  worker.onBar(esBar({ high: 5497, low: 5495, close: 5496, buyVolume: 10, sellVolume: 40 }), new Date(2026, 6, 24, 10, 1));
+  assert.equal(worker.trackedTrades[0].actionInFlight, true);
+});
+
+test("Worker: evaluateOpenTrades leaves a healthy trade alone (HOLD)", () => {
+  const worker = createWorker();
+  worker.onBar(esBar({ high: 5501, low: 5499, close: 5500, buyVolume: 50, sellVolume: 50 }), new Date(2026, 6, 24, 10, 0));
+  const entryIndex = worker.bars.length - 1;
+  worker.trackedTrades.push({
+    strategy: "A", direction: "long", entryPrice: 5500, stopPrice: 5490, originalStopPrice: 5490,
+    targetPrice: 5520, originalTargetPrice: 5520, brokenLevel: 5500, entryIndex, lastRegimeBase: "NEG_GAMMA",
+    movedToBreakeven: true, actionInFlight: false, contractId: "CON.F.US.EP.U26", size: 4, orderId: 1,
+    mfe: 0, mae: 0, openedAt: "t",
+  });
+
+  worker.onBar(esBar({ high: 5503, low: 5501, close: 5502, buyVolume: 50, sellVolume: 50 }), new Date(2026, 6, 24, 10, 1));
+  assert.equal(worker.trackedTrades[0].actionInFlight, false);
+});
+
 test("Worker: detectClosedTrades logs a closed-trade row (with MFE/MAE) once the broker no longer reports the position", () => {
   const worker = createWorker();
   worker.trackedTrades.push({

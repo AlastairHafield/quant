@@ -7,6 +7,7 @@ import {
   detectConsolidation,
   consolidationLevels,
   directionalWallFilter,
+  isInOpenSpace,
 } from "../src/levelEngine.js";
 
 test("buildOrbLevels returns high/low tagged for Strategy A", () => {
@@ -110,6 +111,12 @@ test("directionalWallFilter allows a short breakout toward a near NEG wall (supp
   const result = directionalWallFilter(5482, "short", walls, { nearPts: 15 });
   assert.equal(result.action, "FULL");
   assert.equal(result.wall.strike, 5480);
+});
+
+test("isInOpenSpace: false when a POS wall is close ahead, true otherwise", () => {
+  assert.equal(isInOpenSpace(5518, "long", walls, { nearPts: 15 }), false);
+  assert.equal(isInOpenSpace(5500, "long", walls, { nearPts: 15 }), true);
+  assert.equal(isInOpenSpace(5482, "short", walls, { nearPts: 15 }), true); // NEG wall ahead doesn't count
 });
 
 test("directionalWallFilter skips a short breakout into a near POS wall regardless of which side it sits on", () => {

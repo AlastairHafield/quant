@@ -44,3 +44,18 @@ export function computeTakePartialValueGained(entryPrice, currentPrice, directio
   const pts = direction === "long" ? currentPrice - entryPrice : entryPrice - currentPrice;
   return pts * pointValue * partialSize;
 }
+
+// TopstepX rejects a bracket stop closer than MIN_STOP_TICKS to the entry
+// price (live-verified 2026-07-24: "Invalid stop loss ticks (-1). Price
+// should be at least 4 ticks away." — found testing reopenAt for real).
+// A dynamic-exit stop move (breakeven, tighten-trail) computed independently
+// of the reopen's reference price can land inside that minimum, e.g.
+// breakeven firing right as price is barely past 1R — clamp it outward
+// (further from currentPrice, in the protective direction) rather than let
+// the broker reject the whole reopen.
+export function clampStopDistance(newStopPrice, currentPrice, direction, minDistance) {
+  if (direction === "long") {
+    return Math.min(newStopPrice, currentPrice - minDistance);
+  }
+  return Math.max(newStopPrice, currentPrice + minDistance);
+}

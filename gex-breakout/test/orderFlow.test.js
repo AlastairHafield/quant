@@ -6,6 +6,7 @@ import {
   rollingAvg,
   detectDeltaDivergence,
   detectAbsorption,
+  buildAbsorptionWindow,
   gradeFlow,
   evaluateBreakoutFlow,
 } from "../src/orderFlow.js";
@@ -92,6 +93,29 @@ test("detectAbsorption: high volume but price advances well beyond the level is 
     { high: 5507, low: 5502, volume: 210 },
   ]; // advance = 7 pts, well beyond maxAdvancePts=2
   assert.equal(detectAbsorption(touchWindow, priorBars, 5500, "long", absorptionCfg), false);
+});
+
+function volBar(buyVolume, sellVolume) {
+  return { high: 5500, low: 5499, close: 5500, buyVolume, sellVolume };
+}
+
+test("buildAbsorptionWindow: slices touch/prior windows and derives volume from buy+sell", () => {
+  const bars = [
+    ...Array.from({ length: 20 }, () => volBar(60, 40)), // prior window, volume 100 each
+    volBar(150, 50), // touch window starts here (index 20)
+    volBar(140, 60),
+    volBar(130, 70), // currentIndex 22
+  ];
+  const result = buildAbsorptionWindow(bars, 22, { touchBars: 3, avgLookbackBars: 20 });
+  assert.equal(result.touchWindow.length, 3);
+  assert.equal(result.priorBars.length, 20);
+  assert.equal(result.touchWindow[0].volume, 200); // 150+50
+  assert.equal(result.priorBars[0].volume, 100); // 60+40
+});
+
+test("buildAbsorptionWindow: null when there isn't enough bar history yet to fill both windows", () => {
+  const bars = Array.from({ length: 10 }, () => volBar(60, 40));
+  assert.equal(buildAbsorptionWindow(bars, 9, { touchBars: 3, avgLookbackBars: 20 }), null);
 });
 
 const aDeltaMultiple = 1.5;

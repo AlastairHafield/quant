@@ -76,6 +76,7 @@ export function evaluateStrategyA(ctx) {
   return {
     strategy: "A",
     direction,
+    breakoutLevel,
     entryPrice,
     stopPrice: stop.stopPrice,
     stopDistance: stop.distance,

@@ -9,8 +9,9 @@ import {
   buildDailyLevels,
   detectConsolidation,
   consolidationLevels,
+  isInOpenSpace,
 } from "./levelEngine.js";
-import { evaluateBreakoutFlow } from "./orderFlow.js";
+import { evaluateBreakoutFlow, buildAbsorptionWindow } from "./orderFlow.js";
 import { checkOrbTrigger, evaluateStrategyA } from "./strategyA.js";
 import {
   checkBreakoutTrigger,
@@ -20,10 +21,18 @@ import {
   evaluateStrategyB,
 } from "./strategyB.js";
 import { SessionRiskManager, checkDataHealth, checkRecalcSettle, computeSizeMultiplier } from "./riskSession.js";
+import { evaluateExit } from "./exitRules.js";
 import { startStatusReporter } from "./statusReporter.js";
 import { SignalLogger, buildLogRow } from "./logger.js";
-import { postDiscordEmbed, buildTradeTakenEmbed, flushLogBufferToDiscord } from "./discord.js";
-import { updateMfeMae, computeRealizedPnl } from "./positionTracking.js";
+import { postDiscordEmbed, buildTradeTakenEmbed, buildSignalEmbed, flushLogBufferToDiscord } from "./discord.js";
+import {
+  updateMfeMae,
+  computeRealizedPnl,
+  computeExitNowValueSaved,
+  computeTightenTrailValueSaved,
+  computeTakePartialValueGained,
+  clampStopDistance,
+} from "./positionTracking.js";
 import * as topstepx from "./dataSources/topstepx.js";
 import * as flashalpha from "./dataSources/flashalpha.js";
 import * as tradeJournal from "./tradeJournal.js";
@@ -203,7 +212,14 @@ export class Worker {
         direction: POSITION_TYPE_TO_DIRECTION[pos.type],
         entryPrice: pos.averagePrice,
         stopPrice: null,
+        originalStopPrice: null,
         targetPrice: null,
+        originalTargetPrice: null,
+        brokenLevel: null,
+        entryIndex: null, // unknown — evaluateOpenTrades skips dynamic management for reconciled trades
+        lastRegimeBase: null,
+        movedToBreakeven: true, // no known stop to move; don't attempt it
+        actionInFlight: false,
         contractId: pos.contractId,
         size: pos.size,
         orderId: null,
@@ -239,7 +255,7 @@ export class Worker {
     this.trackedTrades = remaining;
   }
 
-  logClosedTrade(trade) {
+  logClosedTrade(trade, outcome = "closed") {
     const lastBar = this.bars.length ? this.bars[this.bars.length - 1] : null;
     const approxExitPrice = lastBar?.close ?? null;
     const row = buildLogRow({
@@ -249,7 +265,7 @@ export class Worker {
       entryPrice: trade.entryPrice,
       stopPrice: trade.stopPrice,
       targetPrice: trade.targetPrice,
-      outcome: "closed",
+      outcome,
       mfe: trade.mfe,
       mae: trade.mae,
     });
@@ -279,7 +295,7 @@ export class Worker {
       .closeTrade(trade.mongoId, {
         closedAt: new Date().toISOString(),
         exitPrice: approxExitPrice,
-        outcome: "closed",
+        outcome,
         mfe: trade.mfe,
         mae: trade.mae,
         realizedPnl,
@@ -357,6 +373,14 @@ export class Worker {
     for (const trade of this.trackedTrades) {
       Object.assign(trade, updateMfeMae(trade, trade.entryPrice, trade.direction, bar));
     }
+
+    // Managing an already-open position runs independently of whether new
+    // entries are currently allowed (trading cutoff, risk halt, etc.) — an
+    // early-exit or a tighter stop should still fire during a halt, if
+    // anything especially then. trackedTrades is only ever populated when
+    // CONFIG.executionEnabled is true (see executeSignal), so this is a
+    // no-op in signal-only mode without needing its own separate gate.
+    this.evaluateOpenTrades(bar);
 
     if (isWithinOrbWindow(t, orbWindowBounds(CONFIG))) {
       Object.assign(this, updateOrbRange(this, bar));
@@ -577,12 +601,167 @@ export class Worker {
     else if (result.strategy === "B") this.riskManager.recordStrategyBTrade(result.levelKey, Date.now());
   }
 
-  // NOTE: this places the entry with its static bracket (stop/target as computed
-  // at signal time) and stops there — it does not yet implement dynamic in-trade
-  // management (breakeven-at-1R, runner trailing, or exitRules.js's early-exit
-  // conditions like failed-breakout/divergence/absorption). Those are built and
-  // tested as pure functions but not wired into a live position-management loop.
-  // The position runs on its fixed bracket until stop or target fills.
+  // Dynamic in-trade management: evaluateExit's four conditions
+  // (failed-breakout, delta-divergence, absorption, regime-flip) plus
+  // breakeven-at-1R, run against every open trade each bar. One action per
+  // trade per bar (actionInFlight guards against a slow-resolving broker
+  // call overlapping with the next bar's evaluation of the same trade).
+  // Trades from reconcileUntrackedPositions (entryIndex/brokenLevel unknown)
+  // are skipped — there isn't enough context to evaluate them safely.
+  evaluateOpenTrades(bar) {
+    const currentIndex = this.bars.length - 1;
+    for (const trade of [...this.trackedTrades]) {
+      if (trade.actionInFlight) continue;
+      if (trade.entryIndex == null || currentIndex <= trade.entryIndex) continue;
+
+      if (
+        !trade.movedToBreakeven &&
+        trade.stopPrice != null &&
+        trade.originalStopPrice != null &&
+        trade.mfe >= Math.abs(trade.entryPrice - trade.originalStopPrice) * CONFIG.strategyA.breakevenAtR
+      ) {
+        trade.movedToBreakeven = true;
+        trade.actionInFlight = true;
+        this.moveStop(trade, trade.entryPrice, bar.close, "breakeven_at_1r")
+          .catch((e) => console.error("Breakeven move failed:", e.message))
+          .finally(() => {
+            trade.actionInFlight = false;
+          });
+        continue;
+      }
+
+      if (trade.brokenLevel == null) continue;
+
+      const currentRegimeBase = this.lastRegimeInfo?.baseRegime ?? null;
+      const absorption = buildAbsorptionWindow(this.bars, currentIndex, CONFIG.orderFlow.absorption);
+      const result = evaluateExit({
+        direction: trade.direction,
+        currentBar: bar,
+        brokenLevel: trade.brokenLevel,
+        entryIndex: trade.entryIndex,
+        currentIndex,
+        bars: this.bars,
+        inOpenSpace: isInOpenSpace(bar.close, trade.direction, this.levelState.wallsEs, CONFIG.levels.wallFilter),
+        prevRegimeBase: trade.lastRegimeBase,
+        currentRegimeBase,
+        touchWindow: absorption?.touchWindow ?? null,
+        priorBars: absorption?.priorBars ?? [],
+        levelPriceForAbsorption: trade.targetPrice,
+        config: CONFIG,
+      });
+      trade.lastRegimeBase = currentRegimeBase;
+      if (result.action === "HOLD") continue;
+
+      trade.actionInFlight = true;
+      this.actOnExitResult(trade, result, bar)
+        .catch((e) => console.error("Dynamic exit action failed:", e.message))
+        .finally(() => {
+          trade.actionInFlight = false;
+        });
+    }
+  }
+
+  async actOnExitResult(trade, result, bar) {
+    if (result.action === "EXIT_NOW") {
+      const pointValue = POINT_VALUE[CONFIG.instrumentTrade];
+      const valueSaved = computeExitNowValueSaved(bar.close, trade.originalStopPrice, pointValue, trade.size);
+      const accountId = await topstepx.resolveAccountId();
+      await topstepx.closePositionAndCancelOrders(accountId, trade.contractId);
+      this.trackedTrades = this.trackedTrades.filter((t) => t !== trade);
+      this.logClosedTrade(trade, result.reason);
+      this.postDynamicExitEmbed(trade, result.reason, `Exited early — $${valueSaved.toFixed(2)} of stop risk removed`);
+      return;
+    }
+
+    if (result.action === "TIGHTEN_TRAIL") {
+      const trailBars = result.trailBars ?? 1;
+      const window = this.bars.slice(Math.max(0, this.bars.length - trailBars));
+      const newStopPrice =
+        trade.direction === "long" ? Math.min(...window.map((b) => b.low)) : Math.max(...window.map((b) => b.high));
+      const tighter = trade.direction === "long" ? newStopPrice > trade.stopPrice : newStopPrice < trade.stopPrice;
+      if (!tighter) return; // never loosens the stop
+      await this.moveStop(trade, newStopPrice, bar.close, result.reason);
+      return;
+    }
+
+    if (result.action === "TAKE_PARTIAL") {
+      const fraction = CONFIG.strategyA.runner.offFractionAtTarget;
+      const reduceSize = Math.round(trade.size * fraction);
+      const remainingSize = trade.size - reduceSize;
+      if (reduceSize <= 0 || remainingSize <= 0) return; // nothing sensible to reduce
+      const pointValue = POINT_VALUE[CONFIG.instrumentTrade];
+      const tickSize = topstepx.tickSizeFor(CONFIG.instrumentTrade);
+      const clampedStopPrice = clampStopDistance(trade.stopPrice, bar.close, trade.direction, topstepx.MIN_STOP_TICKS * tickSize);
+      const valueGained = computeTakePartialValueGained(trade.entryPrice, bar.close, trade.direction, pointValue, reduceSize);
+      await this.reopenAt(trade, remainingSize, clampedStopPrice, bar.close);
+      trade.stopPrice = clampedStopPrice;
+      trade.size = remainingSize;
+      this.postDynamicExitEmbed(
+        trade,
+        result.reason,
+        `Took partial (${reduceSize} of ${reduceSize + remainingSize}) — $${valueGained.toFixed(2)} locked in, ${remainingSize} still running`
+      );
+    }
+  }
+
+  // Closes the whole position and re-opens it at newSize/newStopPrice with
+  // the same target, built entirely from closePositionAndCancelOrders and
+  // placeBracketOrder (both already live-verified) rather than a new
+  // "modify a resting order" or "attach a bracket to an existing position"
+  // capability — there's no evidence anywhere in this adapter that either
+  // exists on this broker, and guessing at one live, in the automatic loop,
+  // isn't worth the risk. Ticks for the new bracket are computed relative to
+  // currentPrice (where the re-entry market order will actually fill), not
+  // the original entry, since this genuinely is a new order.
+  async reopenAt(trade, newSize, newStopPrice, currentPrice) {
+    const accountId = await topstepx.resolveAccountId();
+    await topstepx.closePositionAndCancelOrders(accountId, trade.contractId);
+    const orderId = await topstepx.placeBracketOrder({
+      accountId,
+      contractId: trade.contractId,
+      direction: trade.direction,
+      size: newSize,
+      entryPrice: currentPrice,
+      stopPrice: newStopPrice,
+      targetPrice: trade.targetPrice,
+      tickSize: topstepx.tickSizeFor(CONFIG.instrumentTrade),
+      customTag: `gex-${trade.strategy}-${trade.direction}-reopen-${Date.now()}`,
+    });
+    trade.orderId = orderId;
+    return orderId;
+  }
+
+  async moveStop(trade, newStopPrice, currentPrice, reason) {
+    const pointValue = POINT_VALUE[CONFIG.instrumentTrade];
+    const tickSize = topstepx.tickSizeFor(CONFIG.instrumentTrade);
+    const clampedStopPrice = clampStopDistance(newStopPrice, currentPrice, trade.direction, topstepx.MIN_STOP_TICKS * tickSize);
+    const oldStopPrice = trade.stopPrice;
+    await this.reopenAt(trade, trade.size, clampedStopPrice, currentPrice);
+    trade.stopPrice = clampedStopPrice;
+    const valueSaved = computeTightenTrailValueSaved(oldStopPrice, clampedStopPrice, pointValue, trade.size);
+    this.postDynamicExitEmbed(
+      trade,
+      reason,
+      `Stop moved ${oldStopPrice.toFixed(2)} → ${clampedStopPrice.toFixed(2)} — $${valueSaved.toFixed(2)} of risk reduced`
+    );
+  }
+
+  postDynamicExitEmbed(trade, reason, description) {
+    postDiscordEmbed(
+      CONFIG.discord.signalWebhook,
+      buildSignalEmbed({
+        title: `⚙️ Dynamic exit — GEX Breakout · Strategy ${trade.strategy} (${reason})`,
+        description,
+        color: 0xf39c12,
+        fields: [
+          ["Direction", trade.direction],
+          ["Size", trade.size],
+        ],
+        footerText: `GEX Breakout · dynamic management · ${new Date().toISOString()}`,
+      })
+    ).catch((e) => console.error("Discord post failed:", e.message));
+  }
+
   // Never hold opposite-direction exposure on the same contract at once —
   // hedging isn't allowed on this account. Strategy A and B can legitimately
   // both be long (or both short) at once, that's untouched; but a live SHORT
@@ -630,7 +809,14 @@ export class Worker {
         direction: result.direction,
         entryPrice: result.entryPrice,
         stopPrice: result.stopPrice,
+        originalStopPrice: result.stopPrice,
         targetPrice: result.targetPrice,
+        originalTargetPrice: result.targetPrice,
+        brokenLevel: result.breakoutLevel ?? result.level?.price ?? null,
+        entryIndex: this.bars.length - 1,
+        lastRegimeBase: this.lastRegimeInfo?.baseRegime ?? null,
+        movedToBreakeven: false,
+        actionInFlight: false,
         contractId,
         size,
         orderId,

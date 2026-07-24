@@ -7,6 +7,7 @@ import {
   computeExitNowValueSaved,
   computeTightenTrailValueSaved,
   computeTakePartialValueGained,
+  clampStopDistance,
 } from "../src/positionTracking.js";
 
 test("barExcursion: long — favorable is how far high ran above entry, adverse is how far low ran below", () => {
@@ -52,4 +53,17 @@ test("computeTightenTrailValueSaved: reduction in max possible loss from moving 
 test("computeTakePartialValueGained: locked-in profit on the reduced portion, direction-aware", () => {
   assert.equal(computeTakePartialValueGained(5500, 5510, "long", 5, 1), 50); // 10pts * $5 * 1
   assert.equal(computeTakePartialValueGained(5500, 5490, "short", 5, 1), 50);
+});
+
+test("clampStopDistance: leaves a stop alone when it's already far enough from the current price", () => {
+  assert.equal(clampStopDistance(5495, 5500, "long", 1), 5495); // 5pts away, min is 1pt
+  assert.equal(clampStopDistance(5505, 5500, "short", 1), 5505);
+});
+
+test("clampStopDistance: pushes a too-close long stop further below the current price", () => {
+  assert.equal(clampStopDistance(5499.75, 5500, "long", 1), 5499); // 0.25pt away -> clamped to exactly 1pt
+});
+
+test("clampStopDistance: pushes a too-close short stop further above the current price", () => {
+  assert.equal(clampStopDistance(5500.25, 5500, "short", 1), 5501);
 });

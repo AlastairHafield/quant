@@ -69,3 +69,13 @@ export function directionalWallFilter(breakoutPrice, direction, walls, { nearPts
   }
   return { action: "FULL", wall: nearest, distance };
 }
+
+// Whether an open position still has room to run before hitting a wall — used
+// by evaluateExit's regime-flip check (exitRules.js), which only tightens the
+// trail if there's actually open space left to trail through. Reuses
+// directionalWallFilter's same POS_WALL-proximity judgment already trusted
+// for entry-time decisions, rather than defining a second notion of "near a
+// wall."
+export function isInOpenSpace(price, direction, walls, wallFilterCfg) {
+  return directionalWallFilter(price, direction, walls, wallFilterCfg).action !== "SKIP_OR_HALF";
+}
