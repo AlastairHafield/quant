@@ -1,6 +1,13 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { barExcursion, updateMfeMae } from "../src/positionTracking.js";
+import {
+  barExcursion,
+  updateMfeMae,
+  computeRealizedPnl,
+  computeExitNowValueSaved,
+  computeTightenTrailValueSaved,
+  computeTakePartialValueGained,
+} from "../src/positionTracking.js";
 
 test("barExcursion: long — favorable is how far high ran above entry, adverse is how far low ran below", () => {
   const r = barExcursion(5500, "long", { high: 5510, low: 5495 });
@@ -24,4 +31,25 @@ test("updateMfeMae: tracks the running maximum across bars, never decreasing", (
 
   state = updateMfeMae(state, 5500, "long", { high: 5520, low: 5495 }); // new favorable high
   assert.deepEqual(state, { mfe: 20, mae: 10 });
+});
+
+test("computeRealizedPnl: long profits when exit is above entry, short profits when exit is below entry", () => {
+  assert.equal(computeRealizedPnl(5500, 5510, "long", 5, 2), 100); // 10pts * $5 * 2
+  assert.equal(computeRealizedPnl(5500, 5490, "long", 5, 2), -100);
+  assert.equal(computeRealizedPnl(5500, 5490, "short", 5, 2), 100);
+  assert.equal(computeRealizedPnl(5500, 5510, "short", 5, 2), -100);
+});
+
+test("computeExitNowValueSaved: risk capital no longer exposed between the actual exit and the original stop", () => {
+  assert.equal(computeExitNowValueSaved(5495, 5490, 5, 2), 50); // 5pts * $5 * 2
+  assert.equal(computeExitNowValueSaved(5490, 5495, 5, 2), 50); // order-independent, always positive
+});
+
+test("computeTightenTrailValueSaved: reduction in max possible loss from moving the stop closer", () => {
+  assert.equal(computeTightenTrailValueSaved(5490, 5495, 5, 2), 50); // 5pts * $5 * 2
+});
+
+test("computeTakePartialValueGained: locked-in profit on the reduced portion, direction-aware", () => {
+  assert.equal(computeTakePartialValueGained(5500, 5510, "long", 5, 1), 50); // 10pts * $5 * 1
+  assert.equal(computeTakePartialValueGained(5500, 5490, "short", 5, 1), 50);
 });

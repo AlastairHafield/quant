@@ -1,5 +1,5 @@
 import { pathToFileURL } from "node:url";
-import { CONFIG } from "./config.js";
+import { CONFIG, POINT_VALUE } from "./config.js";
 import { priorDayAdxOk } from "./adx.js";
 import {
   orbWindowBounds,
@@ -14,7 +14,7 @@ import { computeSize } from "./sizing.js";
 import { SignalLogger, buildLogRow } from "./logger.js";
 import { buildTradeTakenEmbed, postDiscordEmbed, flushLogBufferToDiscord } from "./discord.js";
 import { startStatusReporter } from "./statusReporter.js";
-import { updateMfeMae } from "./positionTracking.js";
+import { updateMfeMae, computeRealizedPnl } from "./positionTracking.js";
 import * as topstepx from "./dataSources/topstepx.js";
 import * as tradeJournal from "./tradeJournal.js";
 
@@ -101,6 +101,10 @@ export class Worker {
       mae: trade.mae,
     });
     row.approx_exit_price = lastBar?.close ?? null;
+    row.realized_pnl =
+      row.approx_exit_price != null
+        ? computeRealizedPnl(trade.entryPrice, row.approx_exit_price, trade.direction, POINT_VALUE[CONFIG.instrument], trade.size)
+        : null;
     this.logger.log(row);
     tradeJournal.logSignal(row, nowET().toDateString()).catch((e) => console.error("Mongo log failed:", e.message));
 
@@ -111,6 +115,7 @@ export class Worker {
         outcome: reason,
         mfe: trade.mfe,
         mae: trade.mae,
+        realizedPnl: row.realized_pnl,
       })
       .catch((e) => console.error("Mongo closeTrade failed:", e.message));
   }

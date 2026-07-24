@@ -1,3 +1,6 @@
+// Standard CME contract multipliers, $ per index point.
+export const POINT_VALUE = { MES: 5, ES: 50 };
+
 export const CONFIG = {
   instrument: process.env.INSTRUMENT || "MES",
   tickSize: 0.25,

@@ -17,3 +17,10 @@ export function updateMfeMae(current, entryPrice, direction, bar) {
     mae: Math.max(current.mae, adverse),
   };
 }
+
+// Realized $ P&L for a closed trade — direction-signed points × contract
+// multiplier × size.
+export function computeRealizedPnl(entryPrice, exitPrice, direction, pointValue, size) {
+  const pts = direction === "long" ? exitPrice - entryPrice : entryPrice - exitPrice;
+  return pts * pointValue * size;
+}

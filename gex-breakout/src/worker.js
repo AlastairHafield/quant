@@ -1,5 +1,5 @@
 import { pathToFileURL } from "node:url";
-import { CONFIG } from "./config.js";
+import { CONFIG, POINT_VALUE } from "./config.js";
 import { computeGexSnapshotFromProfile } from "./gexEngine.js";
 import { computeBasis, toEsLevels } from "./basis.js";
 import { classifyRegime } from "./regime.js";
@@ -23,7 +23,7 @@ import { SessionRiskManager, checkDataHealth, checkRecalcSettle, computeSizeMult
 import { startStatusReporter } from "./statusReporter.js";
 import { SignalLogger, buildLogRow } from "./logger.js";
 import { postDiscordEmbed, buildTradeTakenEmbed, flushLogBufferToDiscord } from "./discord.js";
-import { updateMfeMae } from "./positionTracking.js";
+import { updateMfeMae, computeRealizedPnl } from "./positionTracking.js";
 import * as topstepx from "./dataSources/topstepx.js";
 import * as flashalpha from "./dataSources/flashalpha.js";
 import * as tradeJournal from "./tradeJournal.js";
@@ -253,7 +253,12 @@ export class Worker {
       mfe: trade.mfe,
       mae: trade.mae,
     });
+    const realizedPnl =
+      approxExitPrice != null
+        ? computeRealizedPnl(trade.entryPrice, approxExitPrice, trade.direction, POINT_VALUE[CONFIG.instrumentTrade], trade.size)
+        : null;
     row.approx_exit_price = approxExitPrice; // not part of the base schema, tacked on for this analysis
+    row.realized_pnl = realizedPnl;
     this.logger.log(row);
     tradeJournal.logSignal(row, nowET().toDateString()).catch((e) => console.error("Mongo log failed:", e.message));
 
@@ -277,6 +282,7 @@ export class Worker {
         outcome: "closed",
         mfe: trade.mfe,
         mae: trade.mae,
+        realizedPnl,
       })
       .catch((e) => console.error("Mongo closeTrade failed:", e.message));
   }
