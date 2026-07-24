@@ -11,7 +11,7 @@ import {
 } from "./strategy.js";
 import { computeSize } from "./sizing.js";
 import { SignalLogger, buildLogRow } from "./logger.js";
-import { buildSignalEmbed, buildTradeTakenEmbed, postDiscordEmbed, flushLogBufferToDiscord } from "./discord.js";
+import { buildTradeTakenEmbed, postDiscordEmbed, flushLogBufferToDiscord } from "./discord.js";
 import { startStatusReporter } from "./statusReporter.js";
 import { updateMfeMae } from "./positionTracking.js";
 import * as topstepx from "./dataSources/topstepx.js";
@@ -158,24 +158,8 @@ export class Worker {
     });
     this.logger.log(row);
 
-    if (result.veto) {
-      postDiscordEmbed(
-        CONFIG.discord.webhook,
-        buildSignalEmbed({
-          title: `⚪ VETOED — Mechanical ORB (${result.veto})`,
-          description: `Breakout ${result.direction} beyond ORB high, not taken.`,
-          color: 0x95a5a6,
-          fields: [
-            ["ADX", this.priorDayAdx?.toFixed(1) ?? "n/a"],
-            ["ORB", `${this.orbHigh?.toFixed(2)} / ${this.orbLow?.toFixed(2)}`],
-          ],
-          footerText: `Mechanical ORB · ${new Date().toISOString()}`,
-        })
-      ).catch((e) => console.error("Discord post failed:", e.message));
-      return;
-    }
+    if (result.veto) return; // vetoes are logged only, no alert noise
 
-    this.dayState.tradedToday = true;
     this.executeEntry(result).catch((e) => console.error("Entry execution failed:", e.message));
   }
 
@@ -187,6 +171,9 @@ export class Worker {
     if (CONFIG.executionEnabled) {
       const accountId = await topstepx.resolveAccountId();
       contractId = await topstepx.resolveFrontMonthContractId(CONFIG.instrument);
+      // Throws on a broker rejection (bad size/ticks/etc) — nothing below runs,
+      // so a rejected order leaves openPosition/dayState untouched and a
+      // legitimate retry later today isn't permanently blocked.
       orderId = await topstepx.placeStopOnlyOrder({
         accountId,
         contractId,
@@ -201,10 +188,13 @@ export class Worker {
       console.log(`[EXECUTION-DISABLED] would place ${result.direction} ${size}x @ ${result.entryPrice}`);
     }
 
-    // Tracked regardless of execution mode — the "one trade per day" guard in
-    // onBar() depends on this being set even in signal-only mode, otherwise every
-    // subsequent qualifying bar re-evaluates and spams an "already traded" veto.
+    // Set together, right after order confirmation (or signal-only mode) and
+    // before the Discord post below, so a Discord hiccup can't leave a real
+    // fill untracked. The "one trade per day" guard in onBar() depends on
+    // dayState.tradedToday being set here even in signal-only mode, otherwise
+    // every subsequent qualifying bar re-evaluates and spams re-entry attempts.
     this.openPosition = { ...result, size, contractId, mfe: 0, mae: 0 };
+    this.dayState.tradedToday = true;
 
     await postDiscordEmbed(
       CONFIG.discord.webhook,

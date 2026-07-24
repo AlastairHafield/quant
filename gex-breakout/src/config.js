@@ -98,8 +98,8 @@ export const CONFIG = {
       deltaFeedGapMaxMin: 2,
     },
     sizing: {
-      A: 1,
-      B: 0.5,
+      A: 4,
+      B: 2,
     },
   },
 

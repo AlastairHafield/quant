@@ -306,7 +306,6 @@ export class Worker {
         });
         if (result) {
           this.handleSignal(result, pending.regimeInfo, flow);
-          if (!result.veto) this.riskManager.recordOrbTrade(result.direction);
         }
       }
     }
@@ -364,7 +363,6 @@ export class Worker {
         });
         if (result) {
           this.handleSignal(result, pending.regimeInfo, flow);
-          if (!result.veto) this.riskManager.recordStrategyBTrade(result.levelKey, Date.now());
         }
       }
     }
@@ -425,6 +423,11 @@ export class Worker {
     );
   }
 
+  markTraded(result) {
+    if (result.strategy === "A") this.riskManager.recordOrbTrade(result.direction);
+    else if (result.strategy === "B") this.riskManager.recordStrategyBTrade(result.levelKey, Date.now());
+  }
+
   // NOTE: this places the entry with its static bracket (stop/target as computed
   // at signal time) and stops there — it does not yet implement dynamic in-trade
   // management (breakeven-at-1R, runner trailing, or exitRules.js's early-exit
@@ -437,6 +440,9 @@ export class Worker {
     if (CONFIG.executionEnabled) {
       const accountId = await topstepx.resolveAccountId();
       const contractId = await topstepx.resolveFrontMonthContractId(CONFIG.instrumentTrade);
+      // Throws on a broker rejection (bad size/ticks/etc) — nothing below runs,
+      // so a rejected order leaves trackedTrades/day-state untouched and a
+      // legitimate retry later today isn't permanently blocked.
       orderId = await topstepx.placeBracketOrder({
         accountId,
         contractId,
@@ -469,6 +475,11 @@ export class Worker {
         `[EXECUTION-DISABLED] would place ${result.direction} ${size}x Strategy ${result.strategy} @ ${result.entryPrice}`
       );
     }
+
+    // Set here, right after order confirmation (or signal-only mode) and before
+    // the Discord post below, so a Discord hiccup can't leave a real fill's
+    // day-state untracked (one ORB direction per day / per-level cooldown).
+    this.markTraded(result);
 
     const embed = buildTradeTakenEmbed({
       system: "GEX Breakout",
