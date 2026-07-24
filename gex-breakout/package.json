@@ -12,6 +12,7 @@
     "test": "node --test"
   },
   "dependencies": {
-    "@microsoft/signalr": "^10.0.0"
+    "@microsoft/signalr": "^10.0.0",
+    "mongodb": "^7.5.0"
   }
 }

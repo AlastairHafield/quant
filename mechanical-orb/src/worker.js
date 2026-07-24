@@ -16,6 +16,7 @@ import { buildTradeTakenEmbed, postDiscordEmbed, flushLogBufferToDiscord } from 
 import { startStatusReporter } from "./statusReporter.js";
 import { updateMfeMae } from "./positionTracking.js";
 import * as topstepx from "./dataSources/topstepx.js";
+import * as tradeJournal from "./tradeJournal.js";
 
 export function toET(d) {
   return new Date(d.toLocaleString("en-US", { timeZone: "America/New_York" }));
@@ -25,12 +26,15 @@ export function nowET() {
   return toET(new Date());
 }
 
-// Returns the day-key to flush for if it's at/past the scheduled flush time and
-// that day hasn't been flushed yet, else null.
-export function shouldFlushLogNow(t, logFlushET, lastFlushedDay) {
+// Returns the day-key to flush for if it's at/past the scheduled flush time,
+// else null. Whether that day has already been flushed is checked separately
+// (asynchronously, against Mongo) by the caller — this used to take a
+// lastFlushedDay parameter backed by an in-memory variable, which reset on
+// every restart and could double-flush a day already flushed before it.
+export function shouldFlushLogNow(t, logFlushET) {
   const dayKey = t.toDateString();
   const isFlushTime = minutesOf(t) >= logFlushET.h * 60 + logFlushET.m;
-  return isFlushTime && lastFlushedDay !== dayKey ? dayKey : null;
+  return isFlushTime ? dayKey : null;
 }
 
 export class Worker {
@@ -98,6 +102,17 @@ export class Worker {
     });
     row.approx_exit_price = lastBar?.close ?? null;
     this.logger.log(row);
+    tradeJournal.logSignal(row, nowET().toDateString()).catch((e) => console.error("Mongo log failed:", e.message));
+
+    tradeJournal
+      .closeTrade(trade.mongoId, {
+        closedAt: new Date().toISOString(),
+        exitPrice: row.approx_exit_price,
+        outcome: reason,
+        mfe: trade.mfe,
+        mae: trade.mae,
+      })
+      .catch((e) => console.error("Mongo closeTrade failed:", e.message));
   }
 
   checkDayRollover(t) {
@@ -188,6 +203,7 @@ export class Worker {
       stopPrice: result.stopPrice,
     });
     this.logger.log(row);
+    tradeJournal.logSignal(row, nowET().toDateString()).catch((e) => console.error("Mongo log failed:", e.message));
 
     if (result.veto) return; // vetoes are logged only, no alert noise
 
@@ -224,8 +240,16 @@ export class Worker {
     // fill untracked. The "one trade per day" guard in onBar() depends on
     // dayState.tradedToday being set here even in signal-only mode, otherwise
     // every subsequent qualifying bar re-evaluates and spams re-entry attempts.
-    this.openPosition = { ...result, size, contractId, mfe: 0, mae: 0 };
+    this.openPosition = { ...result, size, contractId, mfe: 0, mae: 0, mongoId: null };
     this.dayState.tradedToday = true;
+
+    // A Mongo hiccup must never block tracking a real fill — best-effort,
+    // openPosition stays tracked with mongoId left null if this fails.
+    try {
+      this.openPosition.mongoId = await tradeJournal.openTrade(this.openPosition, nowET().toDateString());
+    } catch (e) {
+      console.error("Mongo openTrade failed:", e.message);
+    }
 
     await postDiscordEmbed(
       CONFIG.discord.webhook,
@@ -280,22 +304,28 @@ async function startWorker() {
 
   await topstepx.subscribeBars(CONFIG.instrument, (bar) => worker.onBar(bar));
 
-  let lastFlushedDay = null;
+  // Reads "already flushed today" from Mongo rather than an in-memory flag —
+  // a restart used to reset that flag to null and, if the restart happened
+  // after logFlushET, immediately re-flush for a day already flushed before
+  // the restart. Durable state fixes it regardless of how many times the
+  // process restarts. This also replaces the old SIGTERM handler, which used
+  // to flush the in-memory buffer to Discord on every restart/deploy as a
+  // data-loss safety net — every event is now written to Mongo as it
+  // happens, so that safety net (and the scattered Discord dumps it caused
+  // on every deploy) isn't needed anymore.
   setInterval(() => {
-    const dayKey = shouldFlushLogNow(nowET(), CONFIG.logFlushET, lastFlushedDay);
+    const dayKey = shouldFlushLogNow(nowET(), CONFIG.logFlushET);
     if (!dayKey) return;
-    lastFlushedDay = dayKey;
-    flushLogBufferToDiscord(CONFIG.discord.logWebhook, worker.logger.drain(), dayKey, "scheduled").catch((e) =>
-      console.error("Scheduled log flush failed:", e.message)
-    );
+    tradeJournal
+      .isDayFlushed(dayKey)
+      .then(async (alreadyFlushed) => {
+        if (alreadyFlushed) return;
+        await tradeJournal.markDayFlushed(dayKey);
+        const rows = await tradeJournal.fetchDayRows(dayKey);
+        await flushLogBufferToDiscord(CONFIG.discord.logWebhook, rows, dayKey, "scheduled");
+      })
+      .catch((e) => console.error("Scheduled log flush failed:", e.message));
   }, 60_000);
-
-  process.on("SIGTERM", async () => {
-    const rows = worker.logger.drain();
-    const day = new Date().toISOString().slice(0, 10);
-    await flushLogBufferToDiscord(CONFIG.discord.logWebhook, rows, day, "sigterm");
-    process.exit(0);
-  });
 }
 
 const isMain = process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href;

@@ -26,6 +26,7 @@ import { postDiscordEmbed, buildTradeTakenEmbed, flushLogBufferToDiscord } from 
 import { updateMfeMae } from "./positionTracking.js";
 import * as topstepx from "./dataSources/topstepx.js";
 import * as flashalpha from "./dataSources/flashalpha.js";
+import * as tradeJournal from "./tradeJournal.js";
 
 export function toET(d) {
   return new Date(d.toLocaleString("en-US", { timeZone: "America/New_York" }));
@@ -49,13 +50,17 @@ export function isWithinOrbWindow(t, bounds) {
   return m >= bounds.startMin && m < bounds.endMin;
 }
 
-// Returns the day-key to flush for if it's at/past the scheduled flush time and
-// that day hasn't been flushed yet, else null — pure, so the "is it time" logic is
-// testable separately from the setInterval wiring that calls it.
-export function shouldFlushLogNow(t, logFlushET, lastFlushedDay) {
+// Returns the day-key to flush for if it's at/past the scheduled flush time,
+// else null — pure, so the "is it time" logic is testable separately from
+// the setInterval wiring that calls it. Whether that day has already been
+// flushed is checked separately (asynchronously, against Mongo) by the
+// caller — this used to take a lastFlushedDay parameter backed by an
+// in-memory variable, which reset on every restart and could double-flush a
+// day already flushed before the restart.
+export function shouldFlushLogNow(t, logFlushET) {
   const dayKey = t.toDateString();
   const isFlushTime = minutesOf(t) >= logFlushET.h * 60 + logFlushET.m;
-  return isFlushTime && lastFlushedDay !== dayKey ? dayKey : null;
+  return isFlushTime ? dayKey : null;
 }
 
 export function updateOrbRange(current, bar) {
@@ -179,7 +184,7 @@ export class Worker {
     this.openPositions = positions;
     this.accountAsOf = new Date();
     this.detectClosedTrades();
-    this.reconcileUntrackedPositions();
+    await this.reconcileUntrackedPositions();
   }
 
   // trackedTrades only ever exists in this process's memory, built up as
@@ -191,9 +196,9 @@ export class Worker {
   // price and direction come straight from the broker, but stop/target and
   // any MFE/MAE accrued before the restart can't be recovered, so those start
   // over from this reconciliation point.
-  reconcileUntrackedPositions() {
+  async reconcileUntrackedPositions() {
     for (const pos of untrackedPositions(this.openPositions, this.trackedTrades)) {
-      this.trackedTrades.push({
+      const trade = {
         strategy: "reconciled",
         direction: POSITION_TYPE_TO_DIRECTION[pos.type],
         entryPrice: pos.averagePrice,
@@ -205,7 +210,14 @@ export class Worker {
         mfe: 0,
         mae: 0,
         openedAt: new Date().toISOString(),
-      });
+        mongoId: null,
+      };
+      try {
+        trade.mongoId = await tradeJournal.openTrade(trade, nowET().toDateString());
+      } catch (e) {
+        console.error("Mongo openTrade (reconciled) failed:", e.message);
+      }
+      this.trackedTrades.push(trade);
     }
   }
 
@@ -243,6 +255,7 @@ export class Worker {
     });
     row.approx_exit_price = approxExitPrice; // not part of the base schema, tacked on for this analysis
     this.logger.log(row);
+    tradeJournal.logSignal(row, nowET().toDateString()).catch((e) => console.error("Mongo log failed:", e.message));
 
     // Feeds the consecutive-loss kill switch (config.maxConsecLosses) — this
     // was never wired to any real trade closure, so consecutiveLosses stayed
@@ -256,6 +269,16 @@ export class Worker {
         trade.direction === "long" ? approxExitPrice - trade.entryPrice : trade.entryPrice - approxExitPrice;
       this.riskManager.recordTradeResult(approxPnlPts);
     }
+
+    tradeJournal
+      .closeTrade(trade.mongoId, {
+        closedAt: new Date().toISOString(),
+        exitPrice: approxExitPrice,
+        outcome: "closed",
+        mfe: trade.mfe,
+        mae: trade.mae,
+      })
+      .catch((e) => console.error("Mongo closeTrade failed:", e.message));
   }
 
   rebuildLevels() {
@@ -533,6 +556,7 @@ export class Worker {
       targetPrice: result.targetPrice ?? null,
     });
     this.logger.log(row);
+    tradeJournal.logSignal(row, nowET().toDateString()).catch((e) => console.error("Mongo log failed:", e.message));
 
     if (result.veto) return; // vetoes are logged only, no alert noise
 
@@ -595,7 +619,7 @@ export class Worker {
       // Tracked only once there's a real position to eventually detect the close
       // of — MFE/MAE and closure detection both depend on polling a real broker
       // position, which doesn't exist in signal-only mode.
-      this.trackedTrades.push({
+      const trade = {
         strategy: result.strategy,
         direction: result.direction,
         entryPrice: result.entryPrice,
@@ -607,7 +631,17 @@ export class Worker {
         mfe: 0,
         mae: 0,
         openedAt: new Date().toISOString(),
-      });
+        mongoId: null,
+      };
+      // A Mongo hiccup must never block tracking a real fill — best-effort,
+      // trade stays tracked (and MFE/MAE/closure detection keep working)
+      // with mongoId left null if this fails.
+      try {
+        trade.mongoId = await tradeJournal.openTrade(trade, nowET().toDateString());
+      } catch (e) {
+        console.error("Mongo openTrade failed:", e.message);
+      }
+      this.trackedTrades.push(trade);
     } else {
       console.log(
         `[EXECUTION-DISABLED] would place ${result.direction} ${size}x Strategy ${result.strategy} @ ${result.entryPrice}`
@@ -671,22 +705,28 @@ async function startWorker() {
   );
   await topstepx.subscribeBars(CONFIG.instrumentData, (bar) => worker.onBar(bar));
 
-  let lastFlushedDay = null;
+  // Reads "already flushed today" from Mongo rather than an in-memory flag —
+  // a restart used to reset that flag to null and, if the restart happened
+  // after logFlushET, immediately re-flush for a day already flushed before
+  // the restart. Durable state fixes it regardless of how many times the
+  // process restarts. This also replaces the old SIGTERM handler, which used
+  // to flush the in-memory buffer to Discord on every restart/deploy as a
+  // data-loss safety net — every event is now written to Mongo as it
+  // happens, so that safety net (and the scattered Discord dumps it caused
+  // on every deploy) isn't needed anymore.
   setInterval(() => {
-    const dayKey = shouldFlushLogNow(nowET(), CONFIG.logFlushET, lastFlushedDay);
+    const dayKey = shouldFlushLogNow(nowET(), CONFIG.logFlushET);
     if (!dayKey) return;
-    lastFlushedDay = dayKey;
-    flushLogBufferToDiscord(CONFIG.discord.logWebhook, worker.logger.drain(), dayKey, "scheduled").catch((e) =>
-      console.error("Scheduled log flush failed:", e.message)
-    );
+    tradeJournal
+      .isDayFlushed(dayKey)
+      .then(async (alreadyFlushed) => {
+        if (alreadyFlushed) return;
+        await tradeJournal.markDayFlushed(dayKey);
+        const rows = await tradeJournal.fetchDayRows(dayKey);
+        await flushLogBufferToDiscord(CONFIG.discord.logWebhook, rows, dayKey, "scheduled");
+      })
+      .catch((e) => console.error("Scheduled log flush failed:", e.message));
   }, 60_000);
-
-  process.on("SIGTERM", async () => {
-    const rows = worker.logger.drain();
-    const day = new Date().toISOString().slice(0, 10);
-    await flushLogBufferToDiscord(CONFIG.discord.logWebhook, rows, day, "sigterm");
-    process.exit(0);
-  });
 }
 
 // Hand-rolled file:// construction doesn't match on Windows (drive-letter paths need

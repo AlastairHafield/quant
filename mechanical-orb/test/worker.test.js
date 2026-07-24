@@ -120,15 +120,13 @@ test("Worker: a new day resets the OR, day-traded flag, and open position tracki
   assert.equal(worker.orbHigh, 5510);
 });
 
-test("shouldFlushLogNow: null before the scheduled time or if already flushed today", () => {
+test("shouldFlushLogNow: null before the scheduled time", () => {
   const flushET = { h: 16, m: 5 };
-  assert.equal(shouldFlushLogNow(new Date(2026, 6, 24, 16, 4), flushET, null), null);
-  const today = new Date(2026, 6, 24, 16, 5).toDateString();
-  assert.equal(shouldFlushLogNow(new Date(2026, 6, 24, 16, 5), flushET, today), null);
+  assert.equal(shouldFlushLogNow(new Date(2026, 6, 24, 16, 4), flushET), null);
 });
 
-test("shouldFlushLogNow: returns the day-key once at/after the scheduled time on a not-yet-flushed day", () => {
+test("shouldFlushLogNow: returns the day-key at/after the scheduled time — whether it's already been flushed is checked separately, against Mongo", () => {
   const flushET = { h: 16, m: 5 };
   const t = new Date(2026, 6, 24, 16, 10);
-  assert.equal(shouldFlushLogNow(t, flushET, null), t.toDateString());
+  assert.equal(shouldFlushLogNow(t, flushET), t.toDateString());
 });
