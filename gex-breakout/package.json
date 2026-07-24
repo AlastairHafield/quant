@@ -1,0 +1,18 @@
+{
+  "name": "gex-breakout",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "MES breakout system: GEX regime + ES order flow confirmed ORB/breakout signals, forward-test only",
+  "engines": {
+    "node": "20.x"
+  },
+  "scripts": {
+    "start": "node src/worker.js",
+    "test": "node --test"
+  },
+  "dependencies": {
+    "@microsoft/signalr": "^10.0.0",
+    "dotenv": "^16.3.1"
+  }
+}

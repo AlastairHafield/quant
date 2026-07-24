@@ -9,6 +9,7 @@ import MRLab from './pages/MRLab';
 import MRResults from './pages/MRResults';
 import ORBLab from './pages/ORBLab';
 import ORBResults from './pages/ORBResults';
+import GexBreakoutDashboard from './pages/GexBreakoutDashboard';
 import './App.css';
 
 const PEAD_TABS = [
@@ -33,11 +34,16 @@ const ORB_TABS = [
   { id: 'orb-results', label: 'ORB Results', icon: '◉' },
 ];
 
+const GEX_TABS = [
+  { id: 'gex-dashboard', label: 'Live Dashboard', icon: '⬤' },
+];
+
 const GROUPS = [
   { name: 'PEAD',      tabs: PEAD_TABS },
   { name: 'S&D',       tabs: SD_TABS },
   { name: 'MEAN REV',  tabs: MR_TABS },
   { name: 'ORB',       tabs: ORB_TABS },
+  { name: 'GEX BREAKOUT', tabs: GEX_TABS },
 ];
 
 const BUILD = 'v1.3';
@@ -121,6 +127,7 @@ export default function App() {
           />
         )}
         {tab === 'orb-results' && <ORBResults initialRunId={lastORBRunId} initialSweepId={lastORBSweep} />}
+        {tab === 'gex-dashboard' && <GexBreakoutDashboard />}
       </main>
     </div>
   );

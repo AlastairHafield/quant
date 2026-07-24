@@ -7,6 +7,7 @@ import { runMRBacktest, runMRSweep } from '../engine/mrBacktest.js';
 import { runORBBacktest, runORBSweep } from '../engine/orbBacktest.js';
 import { parsePineScriptParams } from '../engine/parsePineScript.js';
 import { getBacktestRuns, getBacktestTrades, getEarningsEvents, removeStock, getSDRuns, getSDTrades, getMRRuns, getMRRun, getMRTrades, getMRSweep, getORBRuns, getORBRun, getORBTrades, getORBSweep } from '../data/db.js';
+import { setGexBreakoutStatus, getGexBreakoutStatus } from '../data/gexBreakoutStatus.js';
 
 const router = express.Router();
 
@@ -336,6 +337,27 @@ router.post('/sd/parse-pinescript', async (req, res) => {
   } catch (e) {
     res.status(500).json({ success: false, error: e.message });
   }
+});
+
+// === GEX BREAKOUT (live worker status relay) ===
+// The gex-breakout worker runs as a separate Heroku dyno with no public routing of
+// its own, so it POSTs its status here on an interval and the frontend polls it
+// back from this (publicly reachable) backend instead of talking to the worker
+// directly.
+
+router.post('/gex-breakout/status', (req, res) => {
+  const expected = process.env.GEX_STATUS_SECRET;
+  if (expected && req.headers['x-status-secret'] !== expected) {
+    return res.status(401).json({ success: false, error: 'invalid status secret' });
+  }
+  setGexBreakoutStatus(req.body);
+  res.json({ success: true });
+});
+
+router.get('/gex-breakout/status', (req, res) => {
+  const status = getGexBreakoutStatus();
+  if (!status) return res.status(404).json({ success: false, error: 'no status reported yet' });
+  res.json({ success: true, data: status });
 });
 
 export default router;
