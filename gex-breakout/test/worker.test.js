@@ -307,6 +307,29 @@ test("Worker: detectClosedTrades logs a closed-trade row (with MFE/MAE) once the
   assert.equal(row.approx_exit_price, 5486);
 });
 
+test("Worker: a closed trade feeds the consecutive-loss kill switch — a losing close increments it, a winning close resets it", () => {
+  const worker = createWorker();
+  worker.riskManager.consecutiveLosses = 1; // pretend one prior loss this session
+
+  worker.trackedTrades.push({
+    strategy: "B", direction: "long", entryPrice: 5500, stopPrice: 5490, targetPrice: 5520,
+    contractId: "CON.F.US.EP.U26", size: 2, orderId: 1, mfe: 0, mae: 10, openedAt: "t",
+  });
+  worker.bars.push({ close: 5492 }); // long, exited below entry -> a loss
+  worker.openPositions = [];
+  worker.detectClosedTrades();
+  assert.equal(worker.riskManager.consecutiveLosses, 2);
+
+  worker.trackedTrades.push({
+    strategy: "B", direction: "long", entryPrice: 5500, stopPrice: 5490, targetPrice: 5520,
+    contractId: "CON.F.US.EP.U26", size: 2, orderId: 2, mfe: 20, mae: 0, openedAt: "t",
+  });
+  worker.bars.push({ close: 5515 }); // long, exited above entry -> a win
+  worker.openPositions = [];
+  worker.detectClosedTrades();
+  assert.equal(worker.riskManager.consecutiveLosses, 0);
+});
+
 test("Worker: detectClosedTrades leaves a trade tracked while the broker still reports a matching position", () => {
   const worker = createWorker();
   worker.trackedTrades.push({

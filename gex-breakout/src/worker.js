@@ -243,6 +243,19 @@ export class Worker {
     });
     row.approx_exit_price = approxExitPrice; // not part of the base schema, tacked on for this analysis
     this.logger.log(row);
+
+    // Feeds the consecutive-loss kill switch (config.maxConsecLosses) — this
+    // was never wired to any real trade closure, so consecutiveLosses stayed
+    // at 0 forever and the kill switch could never trip no matter how many
+    // real losses happened (caught live 2026-07-24: the dashboard's counter
+    // was still 0 right after a real losing trade closed). approxExitPrice
+    // carries the same detection-lag imprecision noted above, so this is a
+    // win/loss determination, not an exact realized PnL figure.
+    if (approxExitPrice != null) {
+      const approxPnlPts =
+        trade.direction === "long" ? approxExitPrice - trade.entryPrice : trade.entryPrice - approxExitPrice;
+      this.riskManager.recordTradeResult(approxPnlPts);
+    }
   }
 
   rebuildLevels() {
