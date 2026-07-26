@@ -9,12 +9,13 @@ export const CONFIG = {
   maxDte: 5,
 
   sessionOpenET: { h: 9, m: 30 },
-  tradingCutoffET: { h: 15, m: 30 },
+  entryCutoffET: { h: 12, m: 0 }, // matches mechanical-orb's entry window
+  flattenAtET: { h: 15, m: 55 }, // matches mechanical-orb's EOD flatten time
   sessionEndET: { h: 16, m: 0 },
   logFlushET: { h: 16, m: 5 }, // dump the day's structured log to Discord once, shortly after close
 
   orbWindowMin: 15,
-  maxConsecLosses: 2,
+  maxLossesPerStrategyPerDay: 2, // plus: a single winning trade also halts that strategy for the day (see riskSession.js)
 
   gexRecalcMin: 15,
   basisRecalcMin: 5,

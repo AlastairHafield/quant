@@ -72,6 +72,10 @@ export function evaluateStrategyA(ctx) {
     fixedTargetR: config.strategyA.fixedTargetR,
     stopDistance: stop.distance,
   });
+  const targetDistance = Math.abs(target.targetPrice - entryPrice);
+  if (targetDistance < stop.distance) {
+    return { strategy: "A", direction, veto: "stop_exceeds_target" };
+  }
 
   return {
     strategy: "A",

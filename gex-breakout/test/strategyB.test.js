@@ -97,6 +97,12 @@ test("evaluateStrategyB: produces a full signal with a GEX-level target on a cle
   assert.equal(result.targetPrice, 5560);
 });
 
+test("evaluateStrategyB: vetoes when the nearest level target sits closer than the stop", () => {
+  const ctx = baseCtx({ levels: [{ type: "FLIP", price: 5540 }] }); // 8pt target vs a 12pt cap-fallback stop
+  const result = evaluateStrategyB(ctx);
+  assert.equal(result.veto, "stop_exceeds_target");
+});
+
 test("evaluateStrategyB: uses the consolidation range for the structural stop when present", () => {
   const ctx = baseCtx({
     price: 5509,

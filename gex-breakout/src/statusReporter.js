@@ -24,8 +24,9 @@ export function buildStatusPayload(worker) {
     dayState: {
       orbTradedDirections: [...worker.riskManager.dayState.orbTradedDirections],
       strategyBTradesToday: worker.riskManager.dayState.strategyBTradesToday,
-      consecutiveLosses: worker.riskManager.consecutiveLosses,
-      haltedForDay: worker.riskManager.haltedForDay,
+      haltedStrategies: [...worker.riskManager.haltedStrategies],
+      winsToday: worker.riskManager.winsToday,
+      lossesToday: worker.riskManager.lossesToday,
     },
     account: worker.account
       ? { id: worker.account.id, name: worker.account.name, balance: worker.account.balance }

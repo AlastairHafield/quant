@@ -37,7 +37,7 @@ export function runChecks({
   flowGrade,
   config,
 }) {
-  if (!timeCheck(nowET, config.tradingCutoffET)) {
+  if (!timeCheck(nowET, config.entryCutoffET)) {
     return { pass: false, vetoReason: "past_trading_cutoff" };
   }
 

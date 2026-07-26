@@ -125,8 +125,13 @@ export default function GexBreakoutDashboard() {
           <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
             <Row label="ORB directions traded" value={status.dayState.orbTradedDirections.join(', ') || 'none'} />
             <Row label="Strategy B trades today" value={status.dayState.strategyBTradesToday} />
-            <Row label="Consecutive losses" value={status.dayState.consecutiveLosses} warn={status.dayState.consecutiveLosses > 0} />
-            <Row label="Halted for day" value={status.dayState.haltedForDay ? 'YES' : 'no'} warn={status.dayState.haltedForDay} />
+            <Row label="Strategy A W/L" value={`${status.dayState.winsToday?.A ?? 0}W / ${status.dayState.lossesToday?.A ?? 0}L`} />
+            <Row label="Strategy B W/L" value={`${status.dayState.winsToday?.B ?? 0}W / ${status.dayState.lossesToday?.B ?? 0}L`} />
+            <Row
+              label="Halted strategies"
+              value={status.dayState.haltedStrategies?.length ? status.dayState.haltedStrategies.join(', ') : 'none'}
+              warn={status.dayState.haltedStrategies?.length > 0}
+            />
           </div>
         </div>
 

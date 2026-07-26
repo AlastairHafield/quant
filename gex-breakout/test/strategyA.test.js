@@ -70,6 +70,12 @@ test("evaluateStrategyA: falls back to fixed_R target when no GEX level lies ahe
   assert.equal(result.targetPrice, result.entryPrice + expectedR);
 });
 
+test("evaluateStrategyA: vetoes when the nearest level target sits closer than the stop", () => {
+  const ctx = baseCtx({ levels: [{ type: "GEX_WALL", price: 5528 }] }); // 1pt target vs a 5.5pt stop
+  const result = evaluateStrategyA(ctx);
+  assert.equal(result.veto, "stop_exceeds_target");
+});
+
 test("evaluateStrategyA: short breakout below ORB low works symmetrically", () => {
   const ctx = baseCtx({
     price: 5511,

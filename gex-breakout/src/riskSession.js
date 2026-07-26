@@ -5,8 +5,9 @@ export class SessionRiskManager {
   }
 
   resetDay() {
-    this.consecutiveLosses = 0;
-    this.haltedForDay = false;
+    this.haltedStrategies = new Set(); // "A" | "B"
+    this.lossesToday = { A: 0, B: 0 };
+    this.winsToday = { A: 0, B: 0 };
     this.orbTradedDirections = new Set();
     this.strategyBTradesToday = 0;
     this.levelCooldowns = new Map();
@@ -20,14 +21,22 @@ export class SessionRiskManager {
     };
   }
 
-  recordTradeResult(pnl) {
-    if (pnl < 0) {
-      this.consecutiveLosses += 1;
-      if (this.consecutiveLosses >= this.config.maxConsecLosses) {
-        this.haltedForDay = true;
+  // One winning trade locks in and halts that strategy for the rest of the
+  // day; a strategy's own losses also halt it independently once they reach
+  // maxLossesPerStrategyPerDay. A and B are tracked separately — a win/halt
+  // on one has no effect on the other. Anything other than "A"/"B" (e.g. the
+  // "reconciled" placeholder strategy used for positions this process didn't
+  // itself open) has no day-state identity to halt, so it's a no-op.
+  recordTradeResult(strategy, pnl) {
+    if (strategy !== "A" && strategy !== "B") return;
+    if (pnl > 0) {
+      this.winsToday[strategy] += 1;
+      this.haltedStrategies.add(strategy);
+    } else if (pnl < 0) {
+      this.lossesToday[strategy] += 1;
+      if (this.lossesToday[strategy] >= this.config.maxLossesPerStrategyPerDay) {
+        this.haltedStrategies.add(strategy);
       }
-    } else {
-      this.consecutiveLosses = 0;
     }
   }
 
@@ -40,8 +49,8 @@ export class SessionRiskManager {
     this.levelCooldowns.set(levelKey, nowMs);
   }
 
-  canTrade() {
-    return !this.haltedForDay;
+  canTrade(strategy) {
+    return !this.haltedStrategies.has(strategy);
   }
 }
 

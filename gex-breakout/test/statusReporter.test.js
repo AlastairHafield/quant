@@ -17,8 +17,9 @@ test("buildStatusPayload: sane defaults before any data has arrived", () => {
   assert.deepEqual(payload.dayState, {
     orbTradedDirections: [],
     strategyBTradesToday: 0,
-    consecutiveLosses: 0,
-    haltedForDay: false,
+    haltedStrategies: [],
+    winsToday: { A: 0, B: 0 },
+    lossesToday: { A: 0, B: 0 },
   });
   assert.deepEqual(payload.recentLog, []);
   assert.equal(payload.account, null);
@@ -46,7 +47,7 @@ test("buildStatusPayload: reflects live GEX/basis/regime/day-state once populate
   worker.rebuildLevels();
   worker.lastRegimeInfo = { regime: "NEG_GAMMA", baseRegime: "NEG_GAMMA", nearFlip: false };
   worker.riskManager.recordOrbTrade("long");
-  worker.riskManager.recordTradeResult(-100);
+  worker.riskManager.recordTradeResult("A", -100);
   worker.bars.push({ close: 5522 });
 
   const payload = buildStatusPayload(worker);
@@ -56,7 +57,7 @@ test("buildStatusPayload: reflects live GEX/basis/regime/day-state once populate
   assert.equal(payload.flipPointEs, 5408);
   assert.equal(payload.basis, 8);
   assert.deepEqual(payload.dayState.orbTradedDirections, ["long"]);
-  assert.equal(payload.dayState.consecutiveLosses, 1);
+  assert.equal(payload.dayState.lossesToday.A, 1);
 });
 
 test("buildStatusPayload: recentLog returns at most the last 50 rows, most recent first", () => {

@@ -66,6 +66,10 @@ export function isWithinOrbWindow(t, bounds) {
   return m >= bounds.startMin && m < bounds.endMin;
 }
 
+export function shouldFlattenNow(t, config) {
+  return minutesOf(t) >= config.flattenAtET.h * 60 + config.flattenAtET.m;
+}
+
 // Returns the day-key to flush for if it's at/past the scheduled flush time,
 // else null — pure, so the "is it time" logic is testable separately from
 // the setInterval wiring that calls it. Whether that day has already been
@@ -285,17 +289,18 @@ export class Worker {
     this.logger.log(row);
     tradeJournal.logSignal(row, nowET().toDateString()).catch((e) => console.error("Mongo log failed:", e.message));
 
-    // Feeds the consecutive-loss kill switch (config.maxConsecLosses) — this
-    // was never wired to any real trade closure, so consecutiveLosses stayed
-    // at 0 forever and the kill switch could never trip no matter how many
-    // real losses happened (caught live 2026-07-24: the dashboard's counter
-    // was still 0 right after a real losing trade closed). approxExitPrice
-    // carries the same detection-lag imprecision noted above, so this is a
-    // win/loss determination, not an exact realized PnL figure.
+    // Feeds the per-strategy win/loss halt (config.maxLossesPerStrategyPerDay,
+    // plus the one-winner-and-done rule) — this was never wired to any real
+    // trade closure before, so the old bot-wide consecutive-loss counter
+    // stayed at 0 forever and the kill switch could never trip no matter how
+    // many real losses happened (caught live 2026-07-24: the dashboard's
+    // counter was still 0 right after a real losing trade closed).
+    // approxExitPrice carries the same detection-lag imprecision noted above,
+    // so this is a win/loss determination, not an exact realized PnL figure.
     if (approxExitPrice != null) {
       const approxPnlPts =
         trade.direction === "long" ? approxExitPrice - trade.entryPrice : trade.entryPrice - approxExitPrice;
-      this.riskManager.recordTradeResult(approxPnlPts);
+      this.riskManager.recordTradeResult(trade.strategy, approxPnlPts);
     }
 
     tradeJournal
@@ -407,12 +412,36 @@ export class Worker {
     }
     if (!this.orbLocked) return;
 
+    // Matches mechanical-orb's window: no new entries past entryCutoffET, and
+    // any position still open past flattenAtET gets force-closed rather than
+    // left to ride its bracket to stop/target/session end.
+    if (shouldFlattenNow(t, CONFIG) && this.trackedTrades.length) {
+      this.flattenAll().catch((e) => console.error("EOD flatten failed:", e.message));
+      return;
+    }
+
     this.evaluateSignals(bar, t);
   }
 
+  // Closes every open trade at once (Strategy A and B can legitimately be
+  // open concurrently) — dedupes by contractId first since a shared contract
+  // only ever has one real net position at the broker (see
+  // closeOnDirectionFlip); calling closePositionAndCancelOrders twice for the
+  // same already-closed contract would just be a wasted/erroring call.
+  async flattenAll() {
+    const accountId = await topstepx.resolveAccountId();
+    const contractIds = [...new Set(this.trackedTrades.map((t) => t.contractId))];
+    for (const contractId of contractIds) {
+      await topstepx.closePositionAndCancelOrders(accountId, contractId);
+    }
+    for (const trade of this.trackedTrades) {
+      this.logClosedTrade(trade, "eod_flatten");
+    }
+    this.trackedTrades = [];
+  }
+
   evaluateSignals(bar, t) {
-    if (!this.riskManager.canTrade()) return;
-    if (minutesOf(t) >= CONFIG.tradingCutoffET.h * 60 + CONFIG.tradingCutoffET.m) return;
+    if (minutesOf(t) >= CONFIG.entryCutoffET.h * 60 + CONFIG.entryCutoffET.m) return;
 
     if (this.basisAsOf) {
       const health = checkDataHealth({
@@ -458,6 +487,8 @@ export class Worker {
   // processed, so triggering arms a pending breakout snapshotted at that bar; it's
   // graded and evaluated one bar later, once the confirmation bar exists.
   tryStrategyA(bar, prevBar, idx, t, regimeInfo) {
+    if (!this.riskManager.canTrade("A")) return;
+
     if (this.pendingA && this.pendingA.breakoutIndex === idx - 1) {
       const pending = this.pendingA;
       this.pendingA = null;
@@ -514,6 +545,8 @@ export class Worker {
   }
 
   tryStrategyB(bar, prevBar, idx, t, regimeInfo) {
+    if (!this.riskManager.canTrade("B")) return;
+
     if (this.pendingB && this.pendingB.breakoutIndex === idx - 1) {
       const pending = this.pendingB;
       this.pendingB = null;

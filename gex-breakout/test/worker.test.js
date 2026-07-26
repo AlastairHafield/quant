@@ -4,6 +4,7 @@ import {
   minutesOf,
   orbWindowBounds,
   isWithinOrbWindow,
+  shouldFlattenNow,
   updateOrbRange,
   computeOrbFromHistoricalBars,
   tradesRequiringCloseOnFlip,
@@ -31,6 +32,13 @@ test("isWithinOrbWindow: true inside the window, false at/after the end and befo
   assert.equal(isWithinOrbWindow(new Date(2026, 6, 24, 9, 44), bounds), true);
   assert.equal(isWithinOrbWindow(new Date(2026, 6, 24, 9, 45), bounds), false);
   assert.equal(isWithinOrbWindow(new Date(2026, 6, 24, 9, 29), bounds), false);
+});
+
+test("shouldFlattenNow: false before flattenAtET, true at/after it", () => {
+  const config = { flattenAtET: { h: 15, m: 55 } };
+  assert.equal(shouldFlattenNow(new Date(2026, 6, 24, 15, 54), config), false);
+  assert.equal(shouldFlattenNow(new Date(2026, 6, 24, 15, 55), config), true);
+  assert.equal(shouldFlattenNow(new Date(2026, 6, 24, 16, 30), config), true);
 });
 
 test("updateOrbRange: expands high/low as bars come in, starting from null", () => {
@@ -251,11 +259,13 @@ test("Worker end-to-end: POS_GAMMA regime vetoes an ORB breakout with no flip br
   assert.equal(worker.riskManager.dayState.orbTradedDirections.size, 0);
 });
 
-test("Worker end-to-end: the consecutive-loss kill switch stops further trading for the day", () => {
+test("Worker end-to-end: a strategy's own loss/win halt stops further trading for the day", () => {
   const worker = createWorker();
-  worker.riskManager.recordTradeResult(-100);
-  worker.riskManager.recordTradeResult(-50);
-  assert.equal(worker.riskManager.canTrade(), false);
+  worker.riskManager.recordTradeResult("A", -100);
+  worker.riskManager.recordTradeResult("A", -50); // A halted: 2 losses
+  worker.riskManager.recordTradeResult("B", 25); // B halted: 1 winner
+  assert.equal(worker.riskManager.canTrade("A"), false);
+  assert.equal(worker.riskManager.canTrade("B"), false);
 
   worker.gexSnapshot = { netGex: -5e9, flipPoint: 5400, walls: { aboveSpot: [], belowSpot: [] } };
   worker.basis = 0;
@@ -267,7 +277,46 @@ test("Worker end-to-end: the consecutive-loss kill switch stops further trading 
     esBar({ high: 5523, low: 5520, close: 5522, buyVolume: 300, sellVolume: 50 }),
     new Date(2026, 6, 24, 9, 46)
   );
-  assert.equal(worker.logger.size, 0); // evaluateSignals bails out before ever logging
+  assert.equal(worker.logger.size, 0); // both tryStrategyA/tryStrategyB bail out before ever logging
+});
+
+test("Worker: onBar routes to the EOD flatten path (skips evaluateSignals) once past flattenAtET with an open trade", () => {
+  const worker = createWorker();
+  worker.orbHigh = 5525;
+  worker.orbLow = 5518;
+  worker.orbLocked = true;
+  worker.gexSnapshot = { netGex: -5e9, flipPoint: 5400, walls: { aboveSpot: [], belowSpot: [] } };
+  worker.basis = 0;
+  worker.rebuildLevels();
+  worker.trackedTrades.push({
+    strategy: "A", direction: "long", entryPrice: 5520, stopPrice: 5515, targetPrice: 5540,
+    contractId: "CON.F.US.EP.U26", size: 4, orderId: 1, mfe: 0, mae: 0, openedAt: "t",
+  });
+
+  // A clean breakout bar that would otherwise fire a Strategy A signal.
+  worker.onBar(
+    esBar({ high: 5528, low: 5526, close: 5527, buyVolume: 300, sellVolume: 50 }),
+    new Date(2026, 6, 24, 15, 56)
+  );
+  assert.equal(worker.logger.size, 0); // evaluateSignals never ran
+});
+
+test("Worker: onBar does not take the flatten path when there's nothing open (falls through to evaluateSignals)", () => {
+  const worker = createWorker();
+  worker.orbHigh = 5525;
+  worker.orbLow = 5518;
+  worker.orbLocked = true;
+  worker.gexSnapshot = { netGex: -5e9, flipPoint: 5400, walls: { aboveSpot: [], belowSpot: [] } };
+  worker.basis = 0;
+  worker.rebuildLevels();
+
+  // Also past entryCutoffET (12:00), so evaluateSignals itself bails out too —
+  // this just confirms flattenAll() is never reached with an empty
+  // trackedTrades (no broker call attempted, nothing thrown synchronously).
+  assert.doesNotThrow(() => {
+    worker.onBar(esBar({ high: 5528, low: 5526, close: 5527, buyVolume: 300, sellVolume: 50 }), new Date(2026, 6, 24, 15, 56));
+  });
+  assert.equal(worker.trackedTrades.length, 0);
 });
 
 test("Worker: onBar updates MFE/MAE for every tracked trade as new bars arrive", () => {
@@ -343,9 +392,8 @@ test("Worker: detectClosedTrades logs a closed-trade row (with MFE/MAE) once the
   assert.equal(row.approx_exit_price, 5486);
 });
 
-test("Worker: a closed trade feeds the consecutive-loss kill switch — a losing close increments it, a winning close resets it", () => {
+test("Worker: a closed trade feeds the per-strategy win/loss halt — a losing close increments losses, a winning close halts that strategy", () => {
   const worker = createWorker();
-  worker.riskManager.consecutiveLosses = 1; // pretend one prior loss this session
 
   worker.trackedTrades.push({
     strategy: "B", direction: "long", entryPrice: 5500, stopPrice: 5490, targetPrice: 5520,
@@ -354,7 +402,8 @@ test("Worker: a closed trade feeds the consecutive-loss kill switch — a losing
   worker.bars.push({ close: 5492 }); // long, exited below entry -> a loss
   worker.openPositions = [];
   worker.detectClosedTrades();
-  assert.equal(worker.riskManager.consecutiveLosses, 2);
+  assert.equal(worker.riskManager.lossesToday.B, 1);
+  assert.equal(worker.riskManager.canTrade("B"), true); // 1 loss, cap is 2
 
   worker.trackedTrades.push({
     strategy: "B", direction: "long", entryPrice: 5500, stopPrice: 5490, targetPrice: 5520,
@@ -363,7 +412,8 @@ test("Worker: a closed trade feeds the consecutive-loss kill switch — a losing
   worker.bars.push({ close: 5515 }); // long, exited above entry -> a win
   worker.openPositions = [];
   worker.detectClosedTrades();
-  assert.equal(worker.riskManager.consecutiveLosses, 0);
+  assert.equal(worker.riskManager.winsToday.B, 1);
+  assert.equal(worker.riskManager.canTrade("B"), false); // one winner and done for the day
 });
 
 test("Worker: detectClosedTrades leaves a trade tracked while the broker still reports a matching position", () => {
