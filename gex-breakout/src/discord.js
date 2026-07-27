@@ -62,17 +62,23 @@ export function buildDailySummaryEmbed(summary, dayKey) {
     .map(([action, v]) => `${action}: ${v.count}x, $${v.valueImpact.toFixed(2)}`)
     .join("\n") || "—";
 
+  const fields = [
+    ["Win rate", trades.winRate != null ? `${(trades.winRate * 100).toFixed(0)}%` : "—"],
+    ["Avg R", trades.avgRMultiple != null ? trades.avgRMultiple.toFixed(2) : "—"],
+    ["By strategy", strategyLines],
+    ["Dynamic exits ($ impact)", dynamicExitLines],
+    ["Top veto reasons", vetoLines],
+  ];
+  if (trades.manualCloses?.count > 0) {
+    const mc = trades.manualCloses;
+    fields.push(["Manual closes", `${mc.count}x (${mc.wins}W/${mc.losses}L), ${mc.pnl >= 0 ? "+" : ""}$${mc.pnl.toFixed(2)}`]);
+  }
+
   return buildSignalEmbed({
     title: `📊 Daily Summary — GEX Breakout · ${dayKey}`,
     description: `${trades.totalTrades} trades, ${trades.wins}W/${trades.losses}L — ${pnlSign}$${trades.totalRealizedPnl.toFixed(2)}`,
     color: trades.totalRealizedPnl >= 0 ? 0x2ecc71 : 0xe74c3c,
-    fields: [
-      ["Win rate", trades.winRate != null ? `${(trades.winRate * 100).toFixed(0)}%` : "—"],
-      ["Avg R", trades.avgRMultiple != null ? trades.avgRMultiple.toFixed(2) : "—"],
-      ["By strategy", strategyLines],
-      ["Dynamic exits ($ impact)", dynamicExitLines],
-      ["Top veto reasons", vetoLines],
-    ],
+    fields,
     footerText: `GEX Breakout · daily summary · ${new Date().toISOString()}`,
   });
 }

@@ -371,7 +371,7 @@ test("Worker: evaluateOpenTrades leaves a healthy trade alone (HOLD)", () => {
   assert.equal(worker.trackedTrades[0].actionInFlight, false);
 });
 
-test("Worker: detectClosedTrades logs a closed-trade row (with MFE/MAE) once the broker no longer reports the position", () => {
+test("Worker: detectClosedTrades logs a closed-trade row (with MFE/MAE) once the broker no longer reports the position", async () => {
   const worker = createWorker();
   worker.trackedTrades.push({
     strategy: "B", direction: "short", entryPrice: 5500, stopPrice: 5510, targetPrice: 5470,
@@ -380,7 +380,7 @@ test("Worker: detectClosedTrades logs a closed-trade row (with MFE/MAE) once the
   worker.bars.push({ close: 5486 });
 
   worker.openPositions = []; // broker reports nothing for this contract -> closed
-  worker.detectClosedTrades();
+  await worker.detectClosedTrades();
 
   assert.equal(worker.trackedTrades.length, 0);
   const row = worker.logger.buffer.find((r) => r.outcome === "closed");
@@ -392,7 +392,7 @@ test("Worker: detectClosedTrades logs a closed-trade row (with MFE/MAE) once the
   assert.equal(row.approx_exit_price, 5486);
 });
 
-test("Worker: a closed trade feeds the per-strategy win/loss halt — a losing close increments losses, a winning close halts that strategy", () => {
+test("Worker: a closed trade feeds the per-strategy win/loss halt — a losing close increments losses, a winning close halts that strategy", async () => {
   const worker = createWorker();
 
   worker.trackedTrades.push({
@@ -401,7 +401,7 @@ test("Worker: a closed trade feeds the per-strategy win/loss halt — a losing c
   });
   worker.bars.push({ close: 5492 }); // long, exited below entry -> a loss
   worker.openPositions = [];
-  worker.detectClosedTrades();
+  await worker.detectClosedTrades();
   assert.equal(worker.riskManager.lossesToday.B, 1);
   assert.equal(worker.riskManager.canTrade("B"), true); // 1 loss, cap is 2
 
@@ -411,22 +411,80 @@ test("Worker: a closed trade feeds the per-strategy win/loss halt — a losing c
   });
   worker.bars.push({ close: 5515 }); // long, exited above entry -> a win
   worker.openPositions = [];
-  worker.detectClosedTrades();
+  await worker.detectClosedTrades();
   assert.equal(worker.riskManager.winsToday.B, 1);
   assert.equal(worker.riskManager.canTrade("B"), false); // one winner and done for the day
 });
 
-test("Worker: detectClosedTrades leaves a trade tracked while the broker still reports a matching position", () => {
+test("Worker: detectClosedTrades leaves a trade tracked while the broker still reports a matching position", async () => {
   const worker = createWorker();
   worker.trackedTrades.push({
     strategy: "A", direction: "long", entryPrice: 5500, stopPrice: 5490, targetPrice: 5520,
     contractId: "CON.F.US.EP.U26", size: 4, orderId: 1, mfe: 5, mae: 2, openedAt: "t",
   });
   worker.openPositions = [{ contractId: "CON.F.US.EP.U26", size: 4 }];
-  worker.detectClosedTrades();
+  await worker.detectClosedTrades();
 
   assert.equal(worker.trackedTrades.length, 1);
   assert.equal(worker.logger.size, 0);
+});
+
+test("classifyPassiveClose: orphaned bracket orders still resting -> manual_close, and they get cancelled", async () => {
+  const worker = createWorker();
+  const trade = { contractId: "CON.F.US.EP.U26" };
+  const cancelled = [];
+  const fakeClient = {
+    resolveAccountId: async () => "acct1",
+    searchOpenOrders: async () => [
+      { id: "o1", contractId: "CON.F.US.EP.U26" },
+      { id: "o2", contractId: "CON.F.US.EP.U26" },
+      { id: "o3", contractId: "CON.OTHER" }, // a different contract's resting order — not ours to touch
+    ],
+    cancelOrder: async (accountId, orderId) => cancelled.push([accountId, orderId]),
+  };
+
+  const outcome = await worker.classifyPassiveClose(trade, fakeClient);
+
+  assert.equal(outcome, "manual_close");
+  assert.deepEqual(cancelled.sort(), [["acct1", "o1"], ["acct1", "o2"]]);
+});
+
+test("classifyPassiveClose: no resting orders on the contract -> closed (a genuine bracket fill)", async () => {
+  const worker = createWorker();
+  const trade = { contractId: "CON.F.US.EP.U26" };
+  const fakeClient = {
+    resolveAccountId: async () => "acct1",
+    searchOpenOrders: async () => [{ id: "o1", contractId: "CON.OTHER" }],
+    cancelOrder: async () => assert.fail("should not cancel anything when nothing is orphaned"),
+  };
+
+  const outcome = await worker.classifyPassiveClose(trade, fakeClient);
+  assert.equal(outcome, "closed");
+});
+
+test("classifyPassiveClose: falls back to closed if the broker check itself fails", async () => {
+  const worker = createWorker();
+  const trade = { contractId: "CON.F.US.EP.U26" };
+  const fakeClient = {
+    resolveAccountId: async () => {
+      throw new Error("network down");
+    },
+  };
+
+  const outcome = await worker.classifyPassiveClose(trade, fakeClient);
+  assert.equal(outcome, "closed");
+});
+
+test("logClosedTrade: a manual_close outcome is logged distinctly and still feeds the win/loss halt like any other close", () => {
+  const worker = createWorker();
+  worker.bars.push({ close: 5508 }); // closed above entry -> a win, same as if the target had filled
+  worker.logClosedTrade(
+    { strategy: "B", direction: "long", entryPrice: 5500, mfe: 8, mae: 0, mongoId: null },
+    "manual_close"
+  );
+  assert.equal(worker.riskManager.winsToday.B, 1);
+  const row = worker.logger.buffer.find((r) => r.outcome === "manual_close");
+  assert.ok(row, "expected a manual_close log row");
 });
 
 test("shouldFlushLogNow: null before the scheduled time", () => {

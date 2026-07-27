@@ -16,6 +16,7 @@ test("computeTradeStats: win rate, avg R-multiple, and $ P&L across closed trade
   assert.equal(stats.totalRealizedPnl, 75);
   assert.equal(stats.avgRMultiple, 0.75); // (2 + -0.5) / 2
   assert.deepEqual(stats.byStrategy, { A: { count: 1, pnl: 100 }, B: { count: 1, pnl: -25 } });
+  assert.deepEqual(stats.manualCloses, { count: 0, wins: 0, losses: 0, pnl: 0 });
 });
 
 test("computeTradeStats: empty input produces nulls, not NaN or a crash", () => {
@@ -23,6 +24,18 @@ test("computeTradeStats: empty input produces nulls, not NaN or a crash", () => 
   assert.equal(stats.totalTrades, 0);
   assert.equal(stats.winRate, null);
   assert.equal(stats.avgRMultiple, null);
+  assert.deepEqual(stats.manualCloses, { count: 0, wins: 0, losses: 0, pnl: 0 });
+});
+
+test("computeTradeStats: breaks out manual closes separately from bracket-driven closes", () => {
+  const trades = [
+    { status: "closed", strategy: "A", outcome: "target_hit", direction: "long", entryPrice: 5500, originalStopPrice: 5490, exitPrice: 5520, realizedPnl: 100 },
+    { status: "closed", strategy: "A", outcome: "manual_close", direction: "long", entryPrice: 5500, originalStopPrice: 5490, exitPrice: 5510, realizedPnl: 50 },
+    { status: "closed", strategy: "B", outcome: "manual_close", direction: "long", entryPrice: 5500, originalStopPrice: 5490, exitPrice: 5495, realizedPnl: -25 },
+  ];
+  const stats = computeTradeStats(trades);
+  assert.equal(stats.totalTrades, 3); // manual closes still count toward the overall totals
+  assert.deepEqual(stats.manualCloses, { count: 2, wins: 1, losses: 1, pnl: 25 });
 });
 
 test("computeVetoBreakdown: counts vetoed signals by reason, ignores non-vetoed rows", () => {

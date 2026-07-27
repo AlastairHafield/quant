@@ -203,7 +203,7 @@ export class Worker {
     this.account = account;
     this.openPositions = positions;
     this.accountAsOf = new Date();
-    this.detectClosedTrades();
+    await this.detectClosedTrades();
     await this.reconcileUntrackedPositions();
   }
 
@@ -253,17 +253,50 @@ export class Worker {
   // we're polling REST rather than trusting the unverified user-hub push stream.
   // Exit price is approximated as the last known bar close (detection lag up to the
   // 5s poll interval) — good enough for MFE/MAE, not exact realized P&L.
-  detectClosedTrades() {
+  async detectClosedTrades() {
     const stillOpenContractIds = new Set(this.openPositions.map((p) => p.contractId));
     const remaining = [];
     for (const trade of this.trackedTrades) {
       if (stillOpenContractIds.has(trade.contractId)) {
         remaining.push(trade);
       } else {
-        this.logClosedTrade(trade);
+        const outcome = await this.classifyPassiveClose(trade);
+        this.logClosedTrade(trade, outcome);
       }
     }
     this.trackedTrades = remaining;
+  }
+
+  // A genuine bracket fill (stop or target) triggers TopstepX's own OCO
+  // logic, which auto-cancels the sibling leg the instant one side fills —
+  // so after a real fill, nothing should be left resting on that contract.
+  // If the position disappeared but its bracket orders are STILL open, that
+  // means neither leg actually filled — something OUTSIDE this bot's own
+  // code closed the position (a manual close via the TopstepX platform UI,
+  // confirmed live 2026-07-27: user closed a trade $260 up, a few ticks
+  // short of target, specifically wanting manual intervention tracked
+  // separately from bracket-driven closes so its effect can be judged later).
+  // Every code path THIS bot uses to close a position on purpose
+  // (closeOnDirectionFlip, flatten, actOnExitResult's EXIT_NOW/reopenAt)
+  // already calls closePositionAndCancelOrders itself, so a leftover bracket
+  // here can't be this bot's own doing — cancel it as cleanup either way.
+  // client defaults to the real topstepx module; tests pass a fake so this can
+  // be verified without a live account (this file's namespace import can't be
+  // monkey-patched from outside — ESM namespace objects are read-only).
+  async classifyPassiveClose(trade, client = topstepx) {
+    try {
+      const accountId = await client.resolveAccountId();
+      const openOrders = await client.searchOpenOrders(accountId);
+      const orphaned = openOrders.filter((o) => o.contractId === trade.contractId);
+      if (orphaned.length === 0) return "closed"; // real bracket fill, nothing left to explain
+      await Promise.all(orphaned.map((o) => client.cancelOrder(accountId, o.id))).catch((e) =>
+        console.error("Failed to cancel orphaned bracket order after a manual close:", e.message)
+      );
+      return "manual_close";
+    } catch (e) {
+      console.error("classifyPassiveClose order check failed:", e.message);
+      return "closed"; // fail safe to the existing generic label rather than block the close
+    }
   }
 
   logClosedTrade(trade, outcome = "closed") {

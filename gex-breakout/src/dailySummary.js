@@ -29,6 +29,17 @@ export function computeTradeStats(trades) {
     byStrategy[t.strategy].pnl += t.realizedPnl;
   }
 
+  // Manual closes (user-initiated, outside the bot's own bracket orders — see
+  // worker.js's classifyPassiveClose) broken out separately so it's possible to
+  // see, over time, whether stepping in helps or hurts vs. leaving the bracket alone.
+  const manualClosed = closed.filter((t) => t.outcome === "manual_close");
+  const manualCloses = {
+    count: manualClosed.length,
+    wins: manualClosed.filter((t) => t.realizedPnl > 0).length,
+    losses: manualClosed.filter((t) => t.realizedPnl < 0).length,
+    pnl: manualClosed.reduce((sum, t) => sum + t.realizedPnl, 0),
+  };
+
   return {
     totalTrades: closed.length,
     wins: wins.length,
@@ -37,6 +48,7 @@ export function computeTradeStats(trades) {
     totalRealizedPnl,
     avgRMultiple,
     byStrategy,
+    manualCloses,
   };
 }
 

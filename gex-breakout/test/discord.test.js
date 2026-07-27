@@ -100,6 +100,31 @@ test("buildDailySummaryEmbed: red when net negative, handles an all-empty day gr
   assert.ok(e.fields.some((f) => f.name === "By strategy" && f.value === "—"));
 });
 
+test("buildDailySummaryEmbed: shows a manual closes field only when at least one happened that day", () => {
+  const withManual = {
+    trades: {
+      totalTrades: 3, wins: 2, losses: 1, winRate: 2 / 3, totalRealizedPnl: 125, avgRMultiple: 0.8,
+      byStrategy: { A: { count: 2, pnl: 150 }, B: { count: 1, pnl: -25 } },
+      manualCloses: { count: 1, wins: 0, losses: 1, pnl: -25 },
+    },
+    vetoes: {},
+    dynamicExits: { totalValueImpact: 0, byAction: {} },
+  };
+  const e1 = buildDailySummaryEmbed(withManual, "2026-07-24").embeds[0];
+  assert.ok(e1.fields.some((f) => f.name === "Manual closes" && f.value.includes("1x (0W/1L)") && f.value.includes("$-25.00")));
+
+  const withoutManual = {
+    trades: {
+      totalTrades: 1, wins: 1, losses: 0, winRate: 1, totalRealizedPnl: 50, avgRMultiple: 1,
+      byStrategy: { A: { count: 1, pnl: 50 } }, manualCloses: { count: 0, wins: 0, losses: 0, pnl: 0 },
+    },
+    vetoes: {},
+    dynamicExits: { totalValueImpact: 0, byAction: {} },
+  };
+  const e2 = buildDailySummaryEmbed(withoutManual, "2026-07-24").embeds[0];
+  assert.ok(!e2.fields.some((f) => f.name === "Manual closes"));
+});
+
 test("postDiscordEmbed: skips the network call entirely when no webhook is configured", async () => {
   let called = false;
   const fakeFetch = async () => {
