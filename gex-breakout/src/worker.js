@@ -644,6 +644,16 @@ export class Worker {
   }
 
   handleSignal(result, regimeInfo, flow) {
+    // This account is shared with Mechanical ORB and Gap Continuation (all
+    // default to the same MES contract), and GEX's own Strategy A/B can
+    // already have one open too — none of these coordinate position sizing
+    // with each other, so stacking a second position on top of an already-open
+    // one compounds risk beyond what any single strategy was sized for.
+    // this.openPositions is the real broker account state (refreshed every
+    // poll), not just this bot's own local view, so it catches a position
+    // opened by another bot on the same account too.
+    const vetoReason = this.openPositions.length > 0 ? "position_already_open" : result.veto;
+
     const row = buildLogRow({
       ts: new Date().toISOString(),
       strategy: result.strategy,
@@ -653,7 +663,7 @@ export class Worker {
       netGex: this.gexSnapshot?.netGex ?? null,
       flipPoint: this.levelState.flipPointEs,
       flowGrade: flow.grade,
-      vetoReason: result.veto,
+      vetoReason,
       entryPrice: result.entryPrice ?? null,
       stopPrice: result.stopPrice ?? null,
       targetPrice: result.targetPrice ?? null,
@@ -661,7 +671,7 @@ export class Worker {
     this.logger.log(row);
     tradeJournal.logSignal(row, nowET().toDateString()).catch((e) => console.error("Mongo log failed:", e.message));
 
-    if (result.veto) return; // vetoes are logged only, no alert noise
+    if (vetoReason) return; // vetoes are logged only, no alert noise
 
     const size = computeSizeMultiplier(flow.grade, result.sizeMultiplier, CONFIG.risk.sizing);
     this.executeSignal(result, regimeInfo, flow, size).catch((e) =>

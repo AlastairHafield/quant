@@ -259,6 +259,39 @@ test("Worker end-to-end: POS_GAMMA regime vetoes an ORB breakout with no flip br
   assert.equal(worker.riskManager.dayState.orbTradedDirections.size, 0);
 });
 
+test("handleSignal: skips a new signal when the account already has an open position (shared with other bots/strategies)", () => {
+  const worker = createWorker();
+  worker.openPositions = [{ contractId: "CON.F.US.MES.U26", size: 4 }]; // e.g. Mechanical ORB or GEX's other strategy
+  const result = { strategy: "A", direction: "long", entryPrice: 5500, stopPrice: 5490, targetPrice: 5520, sizeMultiplier: 1 };
+
+  worker.handleSignal(result, { regime: "NEG_GAMMA" }, { grade: "A" });
+
+  const row = worker.logger.buffer[0];
+  assert.equal(row.veto_reason, "position_already_open");
+  assert.equal(worker.trackedTrades.length, 0);
+});
+
+test("handleSignal: proceeds normally when the account is flat", () => {
+  const worker = createWorker();
+  worker.openPositions = [];
+  const result = { strategy: "A", direction: "long", entryPrice: 5500, stopPrice: 5490, targetPrice: 5520, sizeMultiplier: 1 };
+
+  worker.handleSignal(result, { regime: "NEG_GAMMA" }, { grade: "A" });
+
+  const row = worker.logger.buffer[0];
+  assert.equal(row.veto_reason, null);
+});
+
+test("handleSignal: an already-open position takes priority over the strategy's own veto reason in the logged row", () => {
+  const worker = createWorker();
+  worker.openPositions = [{ contractId: "CON.F.US.MES.U26", size: 4 }];
+  const result = { strategy: "A", direction: "long", veto: "pos_gamma_no_confirmation", sizeMultiplier: 1 };
+
+  worker.handleSignal(result, { regime: "POS_GAMMA" }, { grade: "A" });
+
+  assert.equal(worker.logger.buffer[0].veto_reason, "position_already_open");
+});
+
 test("Worker end-to-end: a strategy's own loss/win halt stops further trading for the day", () => {
   const worker = createWorker();
   worker.riskManager.recordTradeResult("A", -100);
