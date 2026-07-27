@@ -16,6 +16,19 @@ import { updateMfeMae, computeRealizedPnl } from "./positionTracking.js";
 import * as topstepx from "./dataSources/topstepx.js";
 import * as tradeJournal from "./tradeJournal.js";
 
+// ProjectX Gateway position type: 1 = Long, 2 = Short — confirmed live on the
+// other two bots by cross-checking a position's type against the direction
+// of the signal that opened it.
+const POSITION_TYPE_TO_DIRECTION = { 1: "long", 2: "short" };
+
+// Pure half of reconcileUntrackedPosition — split out so it's directly
+// testable without a live resolveFrontMonthContractId call (TopstepX's ESM
+// named exports can't be mocked with node:test's mock.method, same
+// non-configurable-module-namespace issue noted in the other two bots).
+export function findUntrackedPosition(positions, contractId) {
+  return positions.find((p) => p.contractId === contractId && POSITION_TYPE_TO_DIRECTION[p.type]) ?? null;
+}
+
 export function toET(d) {
   return new Date(d.toLocaleString("en-US", { timeZone: "America/New_York" }));
 }
@@ -77,7 +90,47 @@ export class Worker {
     this.account = account;
     this.openPositions = positions;
     this.accountAsOf = new Date();
+    await this.reconcileUntrackedPosition().catch((e) => console.error("Reconcile failed:", e.message));
     this.detectClosedTrade();
+  }
+
+  // this.openPosition only ever exists in this process's memory, built up by
+  // executeEntry() as a real order is placed — a worker restart (like the
+  // uncaught subscribeBars crash confirmed live 2026-07-27) wipes it even
+  // though the broker-side position is still there. Without this, a restart
+  // mid-trade would leave a real position with no bot tracking it at all —
+  // no MFE/MAE, and critically, no EOD-flatten safety net (shouldFlattenNow
+  // only ever fires against a tracked this.openPosition). Best-effort:
+  // direction/entry/size come straight from the broker; the original
+  // stop/target levels aren't recoverable from a bare position record, so
+  // they're left null (detectClosedTrade degrades to a generic "closed"
+  // label rather than guessing target-vs-stop for a reconciled position).
+  async reconcileUntrackedPosition() {
+    if (this.openPosition) return;
+    const contractId = await topstepx.resolveFrontMonthContractId(CONFIG.instrument);
+    const untracked = findUntrackedPosition(this.openPositions, contractId);
+    if (!untracked) return;
+
+    const direction = POSITION_TYPE_TO_DIRECTION[untracked.type];
+    console.error(`Reconciling untracked position: ${direction} ${untracked.size}x @ ${untracked.averagePrice}`);
+    const trade = {
+      direction,
+      entryPrice: untracked.averagePrice,
+      stopPrice: null,
+      targetPrice: null,
+      gapPct: null,
+      size: untracked.size,
+      contractId: untracked.contractId,
+      mfe: 0,
+      mae: 0,
+      mongoId: null,
+    };
+    try {
+      trade.mongoId = await tradeJournal.openTrade(trade, nowET().toDateString());
+    } catch (e) {
+      console.error("Mongo openTrade (reconciled) failed:", e.message);
+    }
+    this.openPosition = trade;
   }
 
   // The bracket's stop OR target filling is the only way a position disappears
@@ -86,7 +139,9 @@ export class Worker {
   // user-hub push stream. Exit price/outcome are approximated from the last
   // known bar close (detection lag up to the poll interval), and the outcome
   // label picks whichever of stop/target that approx price landed closer to —
-  // a logging nicety, not exact (real fill price may differ slightly).
+  // a logging nicety, not exact (real fill price may differ slightly). A
+  // reconciled position (see above) has no known stop/target, so it degrades
+  // to a generic "closed" label instead of guessing.
   detectClosedTrade() {
     if (!this.openPosition) return;
     const stillOpen = this.openPositions.some((p) => p.contractId === this.openPosition.contractId);
@@ -94,7 +149,7 @@ export class Worker {
     const lastBar = this.bars.length ? this.bars[this.bars.length - 1] : null;
     const approxExitPrice = lastBar?.close ?? null;
     let outcome = "closed";
-    if (approxExitPrice != null) {
+    if (approxExitPrice != null && this.openPosition.stopPrice != null && this.openPosition.targetPrice != null) {
       const distToStop = Math.abs(approxExitPrice - this.openPosition.stopPrice);
       const distToTarget = Math.abs(approxExitPrice - this.openPosition.targetPrice);
       outcome = distToTarget <= distToStop ? "target_hit" : "stopped_out";
@@ -282,6 +337,28 @@ export function createWorker() {
   return new Worker();
 }
 
+// A rejected subscribeBars() (e.g. a WebSocket transport failure on the
+// initial connect) is an unhandled rejection if awaited directly in
+// startWorker() — confirmed live 2026-07-27: crashed the whole process on
+// the very first restart after real execution was enabled, right as this bot
+// started managing a real account. subscribeBars() already has
+// .withAutomaticReconnect() for drops AFTER a successful connect; this
+// wrapper is specifically for the initial-connect failure case, retrying
+// with capped backoff instead of ever letting a connection hiccup take the
+// whole worker down (the status reporter and account poller keep running
+// independently either way — only the bar stream that drives new entries is
+// affected while this retries).
+async function subscribeBarsWithRetry(worker, attempt = 1) {
+  try {
+    await topstepx.subscribeBars(CONFIG.instrument, (bar) => worker.onBar(bar));
+  } catch (e) {
+    const waitMs = Math.min(5000 * attempt, 60000);
+    console.error(`subscribeBars failed (attempt ${attempt}): ${e.message} — retrying in ${waitMs / 1000}s`);
+    await new Promise((resolve) => setTimeout(resolve, waitMs));
+    return subscribeBarsWithRetry(worker, attempt + 1);
+  }
+}
+
 async function startWorker() {
   const worker = createWorker();
   console.log(`gap-continuation worker starting — signal-only mode: ${!CONFIG.executionEnabled}`);
@@ -297,7 +374,7 @@ async function startWorker() {
 
   setInterval(() => worker.pollAccount().catch((e) => console.error("Account poll failed:", e.message)), 5000);
 
-  await topstepx.subscribeBars(CONFIG.instrument, (bar) => worker.onBar(bar));
+  await subscribeBarsWithRetry(worker);
 
   // Reads "already flushed today" from Mongo rather than an in-memory flag —
   // durable across restarts, same pattern as the other two bots.

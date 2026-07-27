@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { createWorker, shouldFlushLogNow } from "../src/worker.js";
+import { createWorker, shouldFlushLogNow, findUntrackedPosition } from "../src/worker.js";
 
 function bar(open, high, low, close) {
   return { open, high, low, close };
@@ -120,6 +120,46 @@ test("Worker: a new day resets todayGapChecked, priorClose, and open-position tr
   worker.onBar(bar(102, 102.1, 101.9, 102), new Date(2026, 6, 28, 9, 0)); // next day, before session open
   assert.equal(worker.todayGapChecked, false);
   assert.equal(worker.priorClose, null); // cleared until refreshPriorClose (network, no-ops in this test) resolves
+});
+
+test("findUntrackedPosition: matches a real broker position on our contract with a known type", () => {
+  const positions = [
+    { contractId: "CON.OTHER", type: 1, size: 2, averagePrice: 100 },
+    { contractId: "CON.F.US.MES.U26", type: 1, size: 1, averagePrice: 7462 },
+  ];
+  const result = findUntrackedPosition(positions, "CON.F.US.MES.U26");
+  assert.ok(result);
+  assert.equal(result.averagePrice, 7462);
+});
+
+test("findUntrackedPosition: null when nothing matches our contract", () => {
+  const positions = [{ contractId: "CON.OTHER", type: 1, size: 2, averagePrice: 100 }];
+  assert.equal(findUntrackedPosition(positions, "CON.F.US.MES.U26"), null);
+});
+
+test("findUntrackedPosition: null when a position matches the contract but has an unrecognized type", () => {
+  const positions = [{ contractId: "CON.F.US.MES.U26", type: 99, size: 1, averagePrice: 7462 }];
+  assert.equal(findUntrackedPosition(positions, "CON.F.US.MES.U26"), null);
+});
+
+test("Worker: a reconciled position (no known stop/target) still gets flattened at EOD without guessing STOP-vs-TARGET", async () => {
+  const worker = primedWorker({ priorClose: 100 });
+  // Simulate what reconcileUntrackedPosition() would set after a restart —
+  // no stopPrice/targetPrice since those aren't recoverable from a bare
+  // broker position record.
+  worker.openPosition = {
+    direction: "long", entryPrice: 101.1, stopPrice: null, targetPrice: null,
+    gapPct: null, size: 1, contractId: "CON.F.US.MES.U26", mfe: 0, mae: 0, mongoId: null,
+  };
+  worker.currentDay = new Date(2026, 6, 27).toDateString();
+  worker.todayGapChecked = true;
+
+  worker.onBar(bar(101.4, 101.5, 101.3, 101.4), new Date(2026, 6, 27, 15, 55)); // flatten time
+  await new Promise((resolve) => setImmediate(resolve));
+
+  assert.equal(worker.openPosition, null);
+  const row = worker.logger.buffer.find((r) => r.outcome === "eod_flatten");
+  assert.ok(row, "expected an eod_flatten log row even for a reconciled position");
 });
 
 test("shouldFlushLogNow: null before the scheduled time", () => {
