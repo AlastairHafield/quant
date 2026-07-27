@@ -56,6 +56,16 @@ export function minutesOf(t) {
   return t.getHours() * 60 + t.getMinutes();
 }
 
+// Strategy A (the 15-min ORB variant) has its own independent go-live gate on
+// top of the bot-wide executionEnabled/account switch — see config.js's
+// strategyA.executionEnabled comment. Every other strategy just follows the
+// bot-wide flag, same as before this existed.
+export function isLiveExecutionAllowed(strategy, config) {
+  if (!config.executionEnabled) return false;
+  if (strategy === "A") return config.strategyA.executionEnabled;
+  return true;
+}
+
 export function orbWindowBounds(config) {
   const start = config.sessionOpenET.h * 60 + config.sessionOpenET.m;
   return { startMin: start, endMin: start + config.orbWindowMin };
@@ -952,7 +962,7 @@ export class Worker {
   async executeSignal(result, regimeInfo, flow, size) {
     let orderId = null;
 
-    if (CONFIG.executionEnabled) {
+    if (isLiveExecutionAllowed(result.strategy, CONFIG)) {
       const accountId = await topstepx.resolveAccountId();
       const contractId = await topstepx.resolveFrontMonthContractId(CONFIG.instrumentTrade);
       await this.closeOnDirectionFlip(accountId, contractId, result.direction);

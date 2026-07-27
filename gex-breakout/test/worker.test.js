@@ -13,12 +13,24 @@ import {
   buildLevelState,
   shouldFlushLogNow,
   createWorker,
+  isLiveExecutionAllowed,
 } from "../src/worker.js";
 import { CONFIG } from "../src/config.js";
 
 test("minutesOf converts a Date to minutes-since-midnight", () => {
   assert.equal(minutesOf(new Date(2026, 6, 24, 9, 30)), 570);
   assert.equal(minutesOf(new Date(2026, 6, 24, 0, 0)), 0);
+});
+
+test("isLiveExecutionAllowed: Strategy A needs its own separate flag on top of the bot-wide switch", () => {
+  assert.equal(isLiveExecutionAllowed("A", { executionEnabled: true, strategyA: { executionEnabled: true } }), true);
+  assert.equal(isLiveExecutionAllowed("A", { executionEnabled: true, strategyA: { executionEnabled: false } }), false);
+  assert.equal(isLiveExecutionAllowed("A", { executionEnabled: false, strategyA: { executionEnabled: true } }), false);
+});
+
+test("isLiveExecutionAllowed: Strategy B (and anything else) just follows the bot-wide switch", () => {
+  assert.equal(isLiveExecutionAllowed("B", { executionEnabled: true, strategyA: { executionEnabled: false } }), true);
+  assert.equal(isLiveExecutionAllowed("B", { executionEnabled: false, strategyA: { executionEnabled: false } }), false);
 });
 
 test("orbWindowBounds derives the [open, open+window) range from config", () => {

@@ -74,6 +74,12 @@ export const CONFIG = {
       offFractionAtTarget: 0.5,
       trailBars: 2,
     },
+    // Independent of the top-level executionEnabled/account switch — Strategy A
+    // (the 15-min ORB variant) stays signal-only even once the account points at
+    // the real Combine and Strategy B is live there, until A gets its own
+    // separate go-live decision (2026-07-27: moved Strategy B, the general
+    // level-breakout, to the real Combine; A explicitly held back).
+    executionEnabled: process.env.STRATEGY_A_EXECUTION_ENABLED === "true",
   },
 
   strategyB: {
