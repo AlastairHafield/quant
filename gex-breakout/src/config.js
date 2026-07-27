@@ -110,6 +110,16 @@ export const CONFIG = {
     sizing: {
       A: 4,
       B: 2,
+      // Scales the A/B base sizes above by ladderContracts(equity)/ladder.baseContracts
+      // as account equity grows, preserving A's 2x-of-B ratio and the wall-proximity
+      // multiplier rather than replacing them with a flat count (topstep-prop-firm-plan
+      // Phase 3: 1 contract base, +1 per $2,000 of equity growth, capped at 15).
+      ladder: {
+        baseContracts: 1,
+        perContractEquityStep: 2000,
+        startingEquity: 2000,
+        cap: 15,
+      },
     },
   },
 

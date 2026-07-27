@@ -21,6 +21,7 @@ import {
   evaluateStrategyB,
 } from "./strategyB.js";
 import { SessionRiskManager, checkDataHealth, checkRecalcSettle, computeSizeMultiplier } from "./riskSession.js";
+import { ladderRatio } from "./sizing.js";
 import { evaluateExit } from "./exitRules.js";
 import { startStatusReporter } from "./statusReporter.js";
 import { SignalLogger, buildLogRow } from "./logger.js";
@@ -683,7 +684,12 @@ export class Worker {
 
     if (vetoReason) return; // vetoes are logged only, no alert noise
 
-    const size = computeSizeMultiplier(flow.grade, result.sizeMultiplier, CONFIG.risk.sizing);
+    // account.balance isn't known yet before the first poll — starts at the
+    // ladder's own startingEquity (1 contract) rather than guessing high.
+    const equity = this.account?.balance ?? CONFIG.risk.sizing.ladder.startingEquity;
+    const size =
+      computeSizeMultiplier(flow.grade, result.sizeMultiplier, CONFIG.risk.sizing) *
+      ladderRatio(equity, CONFIG.risk.sizing.ladder);
     this.executeSignal(result, regimeInfo, flow, size).catch((e) =>
       console.error("Signal execution failed:", e.message)
     );
