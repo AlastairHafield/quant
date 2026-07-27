@@ -9,6 +9,7 @@ import { parsePineScriptParams } from '../engine/parsePineScript.js';
 import { getBacktestRuns, getBacktestTrades, getEarningsEvents, removeStock, getSDRuns, getSDTrades, getMRRuns, getMRRun, getMRTrades, getMRSweep, getORBRuns, getORBRun, getORBTrades, getORBSweep } from '../data/db.js';
 import { setGexBreakoutStatus, getGexBreakoutStatus } from '../data/gexBreakoutStatus.js';
 import { setMechanicalOrbStatus, getMechanicalOrbStatus } from '../data/mechanicalOrbStatus.js';
+import { setGapContinuationStatus, getGapContinuationStatus } from '../data/gapContinuationStatus.js';
 import { fetchTrades, fetchExitActions, fetchDailySummaries } from '../data/tradeJournalMongo.js';
 
 const router = express.Router();
@@ -375,6 +376,23 @@ router.post('/mechanical-orb/status', (req, res) => {
 
 router.get('/mechanical-orb/status', (req, res) => {
   const status = getMechanicalOrbStatus();
+  if (!status) return res.status(404).json({ success: false, error: 'no status reported yet' });
+  res.json({ success: true, data: status });
+});
+
+// === GAP CONTINUATION (same relay pattern as GEX Breakout/Mechanical ORB above) ===
+
+router.post('/gap-continuation/status', (req, res) => {
+  const expected = process.env.GAP_CONTINUATION_STATUS_SECRET;
+  if (expected && req.headers['x-status-secret'] !== expected) {
+    return res.status(401).json({ success: false, error: 'invalid status secret' });
+  }
+  setGapContinuationStatus(req.body);
+  res.json({ success: true });
+});
+
+router.get('/gap-continuation/status', (req, res) => {
+  const status = getGapContinuationStatus();
   if (!status) return res.status(404).json({ success: false, error: 'no status reported yet' });
   res.json({ success: true, data: status });
 });

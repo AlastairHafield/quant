@@ -1,0 +1,18 @@
+{
+  "name": "gap-continuation",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Gap-continuation strategy (gap-fill-findings/mechanical-orb-es-revalidation memory): MES, large gap (>=0.5%) + prior-day ADX>=25 filter, gap-fraction stop + 1:1 R:R target, direction follows the gap — live at flat 1 contract",
+  "engines": {
+    "node": "20.x"
+  },
+  "scripts": {
+    "start": "node --env-file=.env src/worker.js",
+    "test": "node --test"
+  },
+  "dependencies": {
+    "@microsoft/signalr": "^10.0.0",
+    "mongodb": "^7.5.0"
+  }
+}
