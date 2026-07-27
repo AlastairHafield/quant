@@ -62,6 +62,16 @@ export async function closeTrade(mongoId, update) {
   await db.collection("trades").updateOne({ _id: mongoId }, { $set: { status: "closed", ...update } });
 }
 
+// Patches an already-inserted trade doc's entry/stop/target once the broker's
+// real fill price is confirmed (see worker.js's confirmRealEntryPrice) — the
+// initial openTrade write uses the strategy's theoretical trigger price since
+// a market order's real fill isn't known synchronously.
+export async function correctEntryPrice(mongoId, update) {
+  if (!mongoId) return;
+  const db = await getDb();
+  await db.collection("trades").updateOne({ _id: mongoId }, { $set: update });
+}
+
 // A record of an in-trade management action (breakeven move, tighten-trail,
 // take-partial) that adjusts an open trade without closing it — closeTrade
 // above only captures full closes, so without this, everything except

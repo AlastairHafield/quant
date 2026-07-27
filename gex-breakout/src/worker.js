@@ -886,6 +886,59 @@ export class Worker {
     this.trackedTrades = this.trackedTrades.filter((t) => t.contractId !== contractId);
   }
 
+  // entryPrice on a freshly-opened trade is the strategy's theoretical trigger-bar
+  // close (see strategyA/strategyB's `entryPrice = price`) — the entry itself is a
+  // MARKET order, so TopstepX's Order/place response never confirms what it actually
+  // filled at, only an orderId. In a fast-moving breakout this can diverge from the
+  // real fill by more than a few ticks (confirmed live 2026-07-27: a real Strategy B
+  // short filled 15 ticks/~$75-of-underlying better than its trigger price, which had
+  // been overstating that trade's tracked $ P&L by $90 — reconciled trades, which
+  // already use the broker's own averagePrice via reconcileUntrackedPositions, didn't
+  // have this problem, which is what exposed the gap). Once the real position shows
+  // up with the broker's own averagePrice, correct entry/stop/target to it — client
+  // defaults to the real topstepx module; tests inject a fake, same pattern as
+  // classifyPassiveClose.
+  async confirmRealEntryPrice(trade, accountId, contractId, client = topstepx, attempts = 5, delayMs = 400) {
+    for (let i = 0; i < attempts; i++) {
+      let positions;
+      try {
+        positions = await client.searchOpenPositions(accountId);
+      } catch (e) {
+        console.error("confirmRealEntryPrice position lookup failed:", e.message);
+        return;
+      }
+      const pos = positions.find((p) => p.contractId === contractId);
+      if (pos?.averagePrice != null) {
+        // Preserve the same point distance from entry to stop/target rather than
+        // resending anything to the broker — TopstepX's bracket was already placed
+        // as tick OFFSETS from the theoretical entry, and standard bracket-order
+        // behavior resolves those ticks against the real fill, so this recovers
+        // what the broker's own absolute stop/target already are, not a new value.
+        const stopOffset = trade.stopPrice - trade.entryPrice;
+        const targetOffset = trade.targetPrice - trade.entryPrice;
+        trade.entryPrice = pos.averagePrice;
+        trade.stopPrice = pos.averagePrice + stopOffset;
+        trade.originalStopPrice = trade.stopPrice;
+        trade.targetPrice = pos.averagePrice + targetOffset;
+        trade.originalTargetPrice = trade.targetPrice;
+        if (trade.mongoId) {
+          tradeJournal
+            .correctEntryPrice(trade.mongoId, {
+              entryPrice: trade.entryPrice,
+              stopPrice: trade.stopPrice,
+              originalStopPrice: trade.originalStopPrice,
+              targetPrice: trade.targetPrice,
+              originalTargetPrice: trade.originalTargetPrice,
+            })
+            .catch((e) => console.error("Mongo correctEntryPrice failed:", e.message));
+        }
+        return;
+      }
+      if (i < attempts - 1) await new Promise((resolve) => setTimeout(resolve, delayMs));
+    }
+    console.error(`confirmRealEntryPrice: no fill confirmed for ${contractId} after ${attempts} attempts, keeping theoretical entry`);
+  }
+
   async executeSignal(result, regimeInfo, flow, size) {
     let orderId = null;
 
@@ -939,7 +992,14 @@ export class Worker {
       } catch (e) {
         console.error("Mongo openTrade failed:", e.message);
       }
+      // Pushed before the fill-price confirmation below starts, not after —
+      // otherwise the next account poll's reconcileUntrackedPositions would see
+      // this same real position with nothing in trackedTrades yet and adopt it
+      // a second time as "reconciled", duplicating this trade.
       this.trackedTrades.push(trade);
+      this.confirmRealEntryPrice(trade, accountId, contractId).catch((e) =>
+        console.error("confirmRealEntryPrice failed:", e.message)
+      );
     } else {
       console.log(
         `[EXECUTION-DISABLED] would place ${result.direction} ${size}x Strategy ${result.strategy} @ ${result.entryPrice}`

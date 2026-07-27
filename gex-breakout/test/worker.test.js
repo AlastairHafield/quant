@@ -487,6 +487,64 @@ test("logClosedTrade: a manual_close outcome is logged distinctly and still feed
   assert.ok(row, "expected a manual_close log row");
 });
 
+test("confirmRealEntryPrice: corrects entry/stop/target to the broker's real fill, preserving the R-distance", async () => {
+  const worker = createWorker();
+  const trade = { entryPrice: 5500, stopPrice: 5490, targetPrice: 5520, mongoId: null };
+  const fakeClient = {
+    searchOpenPositions: async () => [{ contractId: "CON.F.US.EP.U26", averagePrice: 5493.75 }],
+  };
+
+  await worker.confirmRealEntryPrice(trade, "acct1", "CON.F.US.EP.U26", fakeClient);
+
+  assert.equal(trade.entryPrice, 5493.75);
+  assert.equal(trade.stopPrice, 5483.75); // same -10 offset from entry, preserved
+  assert.equal(trade.originalStopPrice, 5483.75);
+  assert.equal(trade.targetPrice, 5513.75); // same +20 offset from entry, preserved
+  assert.equal(trade.originalTargetPrice, 5513.75);
+});
+
+test("confirmRealEntryPrice: retries until the position shows up, then stops", async () => {
+  const worker = createWorker();
+  const trade = { entryPrice: 5500, stopPrice: 5490, targetPrice: 5520, mongoId: null };
+  let calls = 0;
+  const fakeClient = {
+    searchOpenPositions: async () => {
+      calls += 1;
+      if (calls < 3) return []; // not visible yet
+      return [{ contractId: "CON.F.US.EP.U26", averagePrice: 5500.25 }];
+    },
+  };
+
+  await worker.confirmRealEntryPrice(trade, "acct1", "CON.F.US.EP.U26", fakeClient, 5, 1);
+
+  assert.equal(calls, 3);
+  assert.equal(trade.entryPrice, 5500.25);
+});
+
+test("confirmRealEntryPrice: gives up after all attempts and leaves the theoretical entry untouched", async () => {
+  const worker = createWorker();
+  const trade = { entryPrice: 5500, stopPrice: 5490, targetPrice: 5520, mongoId: null };
+  const fakeClient = { searchOpenPositions: async () => [] }; // position never shows up
+
+  await worker.confirmRealEntryPrice(trade, "acct1", "CON.F.US.EP.U26", fakeClient, 3, 1);
+
+  assert.equal(trade.entryPrice, 5500); // untouched
+});
+
+test("confirmRealEntryPrice: a lookup failure is swallowed, leaving the theoretical entry untouched", async () => {
+  const worker = createWorker();
+  const trade = { entryPrice: 5500, stopPrice: 5490, targetPrice: 5520, mongoId: null };
+  const fakeClient = {
+    searchOpenPositions: async () => {
+      throw new Error("network down");
+    },
+  };
+
+  await worker.confirmRealEntryPrice(trade, "acct1", "CON.F.US.EP.U26", fakeClient);
+
+  assert.equal(trade.entryPrice, 5500);
+});
+
 test("shouldFlushLogNow: null before the scheduled time", () => {
   const flushET = { h: 16, m: 5 };
   assert.equal(shouldFlushLogNow(new Date(2026, 6, 24, 16, 4), flushET), null);
