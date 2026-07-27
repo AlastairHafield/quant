@@ -67,6 +67,15 @@ export function isLiveExecutionAllowed(strategy, config) {
   return true;
 }
 
+// Strategy A trades its own account (the practice account) — everything else
+// ("default") trades whatever TOPSTEPX_ACCOUNT_NAME points at (the real
+// Combine). Only two roles exist today; this is the one place that decision
+// is made, so every account-facing method below routes off it consistently
+// instead of re-deriving "is this Strategy A" locally.
+export function accountRoleFor(strategy) {
+  return strategy === "A" ? "A" : "default";
+}
+
 export function orbWindowBounds(config) {
   const start = config.sessionOpenET.h * 60 + config.sessionOpenET.m;
   return { startMin: start, endMin: start + config.orbWindowMin };
@@ -202,20 +211,43 @@ export class Worker {
     this.pendingA = null;
     this.pendingB = null;
     this.lastRegimeInfo = null;
-    this.account = null;
+    this.account = null; // "default" role — everything except Strategy A
     this.openPositions = [];
+    this.accountA = null; // Strategy A's own (practice) account
+    this.openPositionsA = [];
     this.accountAsOf = null;
     this.trackedTrades = []; // locally-tracked open trades, for MFE/MAE + closure detection
   }
 
+  async resolveAccountIdForRole(role) {
+    return topstepx.resolveAccountId(role === "A" ? CONFIG.strategyA.accountNameHint : undefined);
+  }
+
+  // Polls both accounts independently — a failure resolving/fetching one
+  // (e.g. STRATEGY_A_ACCOUNT_NAME misconfigured) must never block the other,
+  // since Strategy B's real-account trading has to keep working regardless of
+  // Strategy A's practice-account health.
   async pollAccount() {
-    const accountId = await topstepx.resolveAccountId();
-    const { account, positions } = await topstepx.fetchAccountSnapshot(accountId);
-    this.account = account;
-    this.openPositions = positions;
+    await Promise.all([this.pollAccountForRole("default"), this.pollAccountForRole("A")]);
     this.accountAsOf = new Date();
     await this.detectClosedTrades();
     await this.reconcileUntrackedPositions();
+  }
+
+  async pollAccountForRole(role) {
+    try {
+      const accountId = await this.resolveAccountIdForRole(role);
+      const { account, positions } = await topstepx.fetchAccountSnapshot(accountId);
+      if (role === "A") {
+        this.accountA = account;
+        this.openPositionsA = positions;
+      } else {
+        this.account = account;
+        this.openPositions = positions;
+      }
+    } catch (e) {
+      console.error(`pollAccountForRole(${role}) failed:`, e.message);
+    }
   }
 
   // trackedTrades only ever exists in this process's memory, built up as
@@ -228,9 +260,22 @@ export class Worker {
   // any MFE/MAE accrued before the restart can't be recovered, so those start
   // over from this reconciliation point.
   async reconcileUntrackedPositions() {
-    for (const pos of untrackedPositions(this.openPositions, this.trackedTrades)) {
+    await this.reconcileUntrackedPositionsForRole("default", this.openPositions);
+    await this.reconcileUntrackedPositionsForRole("A", this.openPositionsA);
+  }
+
+  // Scoped to trackedTrades from the SAME role before checking for untracked
+  // positions — both accounts trade the same MES contract, so matching by
+  // contractId alone across the whole (unscoped) trackedTrades list could
+  // treat Strategy A's practice position as "already tracked" because of an
+  // unrelated Strategy B trade on the real account sharing that contractId,
+  // or vice versa.
+  async reconcileUntrackedPositionsForRole(role, openPositions) {
+    const roleTrackedTrades = this.trackedTrades.filter((t) => t.accountRole === role);
+    for (const pos of untrackedPositions(openPositions, roleTrackedTrades)) {
       const trade = {
         strategy: "reconciled",
+        accountRole: role,
         direction: POSITION_TYPE_TO_DIRECTION[pos.type],
         entryPrice: pos.averagePrice,
         stopPrice: null,
@@ -265,10 +310,13 @@ export class Worker {
   // Exit price is approximated as the last known bar close (detection lag up to the
   // 5s poll interval) — good enough for MFE/MAE, not exact realized P&L.
   async detectClosedTrades() {
-    const stillOpenContractIds = new Set(this.openPositions.map((p) => p.contractId));
+    const stillOpenByRole = {
+      default: new Set(this.openPositions.map((p) => p.contractId)),
+      A: new Set(this.openPositionsA.map((p) => p.contractId)),
+    };
     const remaining = [];
     for (const trade of this.trackedTrades) {
-      if (stillOpenContractIds.has(trade.contractId)) {
+      if (stillOpenByRole[trade.accountRole ?? "default"].has(trade.contractId)) {
         remaining.push(trade);
       } else {
         const outcome = await this.classifyPassiveClose(trade);
@@ -296,7 +344,8 @@ export class Worker {
   // monkey-patched from outside — ESM namespace objects are read-only).
   async classifyPassiveClose(trade, client = topstepx) {
     try {
-      const accountId = await client.resolveAccountId();
+      const role = trade.accountRole ?? "default";
+      const accountId = await client.resolveAccountId(role === "A" ? CONFIG.strategyA.accountNameHint : undefined);
       const openOrders = await client.searchOpenOrders(accountId);
       const orphaned = openOrders.filter((o) => o.contractId === trade.contractId);
       if (orphaned.length === 0) return "closed"; // real bracket fill, nothing left to explain
@@ -468,15 +517,24 @@ export class Worker {
   }
 
   // Closes every open trade at once (Strategy A and B can legitimately be
-  // open concurrently) — dedupes by contractId first since a shared contract
-  // only ever has one real net position at the broker (see
-  // closeOnDirectionFlip); calling closePositionAndCancelOrders twice for the
-  // same already-closed contract would just be a wasted/erroring call.
+  // open concurrently) — dedupes by (accountRole, contractId) since a shared
+  // contract only ever has one real net position PER ACCOUNT at the broker
+  // (see closeOnDirectionFlip); calling closePositionAndCancelOrders twice
+  // for the same already-closed account+contract would just be a
+  // wasted/erroring call. Strategy A (practice) and everything else (real
+  // Combine) are different accounts now, so contractId alone isn't unique.
   async flattenAll() {
-    const accountId = await topstepx.resolveAccountId();
-    const contractIds = [...new Set(this.trackedTrades.map((t) => t.contractId))];
-    for (const contractId of contractIds) {
-      await topstepx.closePositionAndCancelOrders(accountId, contractId);
+    const roles = [...new Set(this.trackedTrades.map((t) => t.accountRole ?? "default"))];
+    for (const role of roles) {
+      const accountId = await this.resolveAccountIdForRole(role);
+      const contractIds = [
+        ...new Set(
+          this.trackedTrades.filter((t) => (t.accountRole ?? "default") === role).map((t) => t.contractId)
+        ),
+      ];
+      for (const contractId of contractIds) {
+        await topstepx.closePositionAndCancelOrders(accountId, contractId);
+      }
     }
     for (const trade of this.trackedTrades) {
       this.logClosedTrade(trade, "eod_flatten");
@@ -655,15 +713,15 @@ export class Worker {
   }
 
   handleSignal(result, regimeInfo, flow) {
-    // This account is shared with Mechanical ORB and Gap Continuation (all
-    // default to the same MES contract), and GEX's own Strategy A/B can
-    // already have one open too — none of these coordinate position sizing
-    // with each other, so stacking a second position on top of an already-open
-    // one compounds risk beyond what any single strategy was sized for.
-    // this.openPositions is the real broker account state (refreshed every
-    // poll), not just this bot's own local view, so it catches a position
-    // opened by another bot on the same account too.
-    const vetoReason = this.openPositions.length > 0 ? "position_already_open" : result.veto;
+    // Strategy A (practice account) and everything else (real Combine, shared
+    // with Mechanical ORB and Gap Continuation) are on different accounts now
+    // — each checks only ITS OWN account's real position state (refreshed
+    // every poll), not just this bot's own local view, so this still catches
+    // a position opened by another bot on the real account, without Strategy
+    // A's practice-account activity ever blocking (or being blocked by) it.
+    const role = accountRoleFor(result.strategy);
+    const relevantPositions = role === "A" ? this.openPositionsA : this.openPositions;
+    const vetoReason = relevantPositions.length > 0 ? "position_already_open" : result.veto;
 
     const row = buildLogRow({
       ts: new Date().toISOString(),
@@ -686,7 +744,8 @@ export class Worker {
 
     // account.balance isn't known yet before the first poll — starts at the
     // ladder's own startingEquity (1 contract) rather than guessing high.
-    const equity = this.account?.balance ?? CONFIG.risk.sizing.ladder.startingEquity;
+    const account = role === "A" ? this.accountA : this.account;
+    const equity = account?.balance ?? CONFIG.risk.sizing.ladder.startingEquity;
     const size =
       computeSizeMultiplier(flow.grade, result.sizeMultiplier, CONFIG.risk.sizing) *
       ladderRatio(equity, CONFIG.risk.sizing.ladder);
@@ -764,7 +823,7 @@ export class Worker {
     if (result.action === "EXIT_NOW") {
       const pointValue = POINT_VALUE[CONFIG.instrumentTrade];
       const valueSaved = computeExitNowValueSaved(bar.close, trade.originalStopPrice, pointValue, trade.size);
-      const accountId = await topstepx.resolveAccountId();
+      const accountId = await this.resolveAccountIdForRole(trade.accountRole ?? "default");
       await topstepx.closePositionAndCancelOrders(accountId, trade.contractId);
       this.trackedTrades = this.trackedTrades.filter((t) => t !== trade);
       this.logClosedTrade(trade, result.reason);
@@ -816,7 +875,7 @@ export class Worker {
   // currentPrice (where the re-entry market order will actually fill), not
   // the original entry, since this genuinely is a new order.
   async reopenAt(trade, newSize, newStopPrice, currentPrice) {
-    const accountId = await topstepx.resolveAccountId();
+    const accountId = await this.resolveAccountIdForRole(trade.accountRole ?? "default");
     await topstepx.closePositionAndCancelOrders(accountId, trade.contractId);
     const orderId = await topstepx.placeBracketOrder({
       accountId,
@@ -904,12 +963,19 @@ export class Worker {
   // resting, and one filled on its own a minute later, leaving a naked,
   // untracked position with no stop or target (caught live 2026-07-24,
   // manually flattened).
-  async closeOnDirectionFlip(accountId, contractId, newDirection) {
-    const toClose = tradesRequiringCloseOnFlip(this.trackedTrades, contractId, newDirection);
+  // Scoped to trackedTrades from the SAME account role as the incoming
+  // signal — Strategy A (practice) and everything else (real Combine) are on
+  // different accounts entirely now, so a direction flip on one account must
+  // never touch a same-contract position that's actually sitting on the
+  // other account.
+  async closeOnDirectionFlip(accountId, contractId, newDirection, accountRole) {
+    const roleTrackedTrades = this.trackedTrades.filter((t) => (t.accountRole ?? "default") === accountRole);
+    const toClose = tradesRequiringCloseOnFlip(roleTrackedTrades, contractId, newDirection);
     if (!toClose.length) return;
     await topstepx.closePositionAndCancelOrders(accountId, contractId);
     for (const trade of toClose) this.logClosedTrade(trade);
-    this.trackedTrades = this.trackedTrades.filter((t) => t.contractId !== contractId);
+    const toCloseSet = new Set(toClose);
+    this.trackedTrades = this.trackedTrades.filter((t) => !toCloseSet.has(t));
   }
 
   // entryPrice on a freshly-opened trade is the strategy's theoretical trigger-bar
@@ -969,9 +1035,10 @@ export class Worker {
     let orderId = null;
 
     if (isLiveExecutionAllowed(result.strategy, CONFIG)) {
-      const accountId = await topstepx.resolveAccountId();
+      const accountRole = accountRoleFor(result.strategy);
+      const accountId = await this.resolveAccountIdForRole(accountRole);
       const contractId = await topstepx.resolveFrontMonthContractId(CONFIG.instrumentTrade);
-      await this.closeOnDirectionFlip(accountId, contractId, result.direction);
+      await this.closeOnDirectionFlip(accountId, contractId, result.direction, accountRole);
       // Throws on a broker rejection (bad size/ticks/etc) — nothing below runs,
       // so a rejected order leaves trackedTrades/day-state untouched and a
       // legitimate retry later today isn't permanently blocked.
@@ -991,6 +1058,7 @@ export class Worker {
       // position, which doesn't exist in signal-only mode.
       const trade = {
         strategy: result.strategy,
+        accountRole,
         direction: result.direction,
         entryPrice: result.entryPrice,
         stopPrice: result.stopPrice,
@@ -1049,7 +1117,7 @@ export class Worker {
         ["Regime", regimeInfo.regime],
         ["Flow grade", flow.grade],
         ["Target mode", result.targetMode],
-        ["Mode", CONFIG.executionEnabled ? "LIVE" : "SIGNAL-ONLY"],
+        ["Mode", isLiveExecutionAllowed(result.strategy, CONFIG) ? `LIVE (${accountRoleFor(result.strategy)})` : "SIGNAL-ONLY"],
       ],
       orderId,
     });

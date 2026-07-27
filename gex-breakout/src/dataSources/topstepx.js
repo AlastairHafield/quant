@@ -273,12 +273,19 @@ export function selectAccount(accounts, nameHint = null) {
   return tradable[0];
 }
 
-let cachedAccountId = null;
+// Keyed by nameHint, not a single value — GEX Breakout now resolves two
+// different accounts in the same process (Strategy A on practice, everything
+// else on the real Combine), so a single-slot cache would silently return
+// whichever account resolved first for every later call regardless of the
+// nameHint actually passed in.
+const cachedAccountIds = new Map();
 export async function resolveAccountId(nameHint = process.env.TOPSTEPX_ACCOUNT_NAME || null) {
-  if (cachedAccountId != null) return cachedAccountId;
+  const cacheKey = nameHint ?? "";
+  if (cachedAccountIds.has(cacheKey)) return cachedAccountIds.get(cacheKey);
   const accounts = await searchAccounts(true);
-  cachedAccountId = selectAccount(accounts, nameHint).id;
-  return cachedAccountId;
+  const accountId = selectAccount(accounts, nameHint).id;
+  cachedAccountIds.set(cacheKey, accountId);
+  return accountId;
 }
 
 export async function placeBracketOrder(params) {

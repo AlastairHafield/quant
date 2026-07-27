@@ -14,6 +14,7 @@ import {
   shouldFlushLogNow,
   createWorker,
   isLiveExecutionAllowed,
+  accountRoleFor,
 } from "../src/worker.js";
 import { CONFIG } from "../src/config.js";
 
@@ -26,6 +27,12 @@ test("isLiveExecutionAllowed: Strategy A needs its own separate flag on top of t
   assert.equal(isLiveExecutionAllowed("A", { executionEnabled: true, strategyA: { executionEnabled: true } }), true);
   assert.equal(isLiveExecutionAllowed("A", { executionEnabled: true, strategyA: { executionEnabled: false } }), false);
   assert.equal(isLiveExecutionAllowed("A", { executionEnabled: false, strategyA: { executionEnabled: true } }), false);
+});
+
+test("accountRoleFor: Strategy A gets its own role, everything else is 'default'", () => {
+  assert.equal(accountRoleFor("A"), "A");
+  assert.equal(accountRoleFor("B"), "default");
+  assert.equal(accountRoleFor("reconciled"), "default");
 });
 
 test("isLiveExecutionAllowed: Strategy B (and anything else) just follows the bot-wide switch", () => {
@@ -271,10 +278,10 @@ test("Worker end-to-end: POS_GAMMA regime vetoes an ORB breakout with no flip br
   assert.equal(worker.riskManager.dayState.orbTradedDirections.size, 0);
 });
 
-test("handleSignal: skips a new signal when the account already has an open position (shared with other bots/strategies)", () => {
+test("handleSignal: skips a new signal when the real account already has an open position (shared with other bots)", () => {
   const worker = createWorker();
-  worker.openPositions = [{ contractId: "CON.F.US.MES.U26", size: 4 }]; // e.g. Mechanical ORB or GEX's other strategy
-  const result = { strategy: "A", direction: "long", entryPrice: 5500, stopPrice: 5490, targetPrice: 5520, sizeMultiplier: 1 };
+  worker.openPositions = [{ contractId: "CON.F.US.MES.U26", size: 4 }]; // e.g. Mechanical ORB
+  const result = { strategy: "B", direction: "long", entryPrice: 5500, stopPrice: 5490, targetPrice: 5520, sizeMultiplier: 1 };
 
   worker.handleSignal(result, { regime: "NEG_GAMMA" }, { grade: "A" });
 
@@ -286,7 +293,7 @@ test("handleSignal: skips a new signal when the account already has an open posi
 test("handleSignal: proceeds normally when the account is flat", () => {
   const worker = createWorker();
   worker.openPositions = [];
-  const result = { strategy: "A", direction: "long", entryPrice: 5500, stopPrice: 5490, targetPrice: 5520, sizeMultiplier: 1 };
+  const result = { strategy: "B", direction: "long", entryPrice: 5500, stopPrice: 5490, targetPrice: 5520, sizeMultiplier: 1 };
 
   worker.handleSignal(result, { regime: "NEG_GAMMA" }, { grade: "A" });
 
@@ -297,11 +304,33 @@ test("handleSignal: proceeds normally when the account is flat", () => {
 test("handleSignal: an already-open position takes priority over the strategy's own veto reason in the logged row", () => {
   const worker = createWorker();
   worker.openPositions = [{ contractId: "CON.F.US.MES.U26", size: 4 }];
-  const result = { strategy: "A", direction: "long", veto: "pos_gamma_no_confirmation", sizeMultiplier: 1 };
+  const result = { strategy: "B", direction: "long", veto: "pos_gamma_no_confirmation", sizeMultiplier: 1 };
 
   worker.handleSignal(result, { regime: "POS_GAMMA" }, { grade: "A" });
 
   assert.equal(worker.logger.buffer[0].veto_reason, "position_already_open");
+});
+
+test("handleSignal: Strategy A checks its OWN (practice) account's positions, independent of the real account", () => {
+  const worker = createWorker();
+  worker.openPositions = [{ contractId: "CON.F.US.MES.U26", size: 4 }]; // real account has something open (e.g. Strategy B)
+  worker.openPositionsA = []; // but the practice account is flat
+  const result = { strategy: "A", direction: "long", entryPrice: 5500, stopPrice: 5490, targetPrice: 5520, sizeMultiplier: 1 };
+
+  worker.handleSignal(result, { regime: "NEG_GAMMA" }, { grade: "A" });
+
+  assert.equal(worker.logger.buffer[0].veto_reason, null); // not blocked by the real account's unrelated position
+});
+
+test("handleSignal: Strategy B is unaffected by Strategy A's own practice-account position", () => {
+  const worker = createWorker();
+  worker.openPositions = []; // real account is flat
+  worker.openPositionsA = [{ contractId: "CON.F.US.MES.U26", size: 4 }]; // practice account has something open
+  const result = { strategy: "B", direction: "long", entryPrice: 5500, stopPrice: 5490, targetPrice: 5520, sizeMultiplier: 1 };
+
+  worker.handleSignal(result, { regime: "NEG_GAMMA" }, { grade: "A" });
+
+  assert.equal(worker.logger.buffer[0].veto_reason, null); // not blocked by Strategy A's unrelated practice position
 });
 
 test("Worker end-to-end: a strategy's own loss/win halt stops further trading for the day", () => {
@@ -472,6 +501,37 @@ test("Worker: detectClosedTrades leaves a trade tracked while the broker still r
 
   assert.equal(worker.trackedTrades.length, 1);
   assert.equal(worker.logger.size, 0);
+});
+
+test("detectClosedTrades: checks each tracked trade against its OWN account role's positions, not the other account's", async () => {
+  const worker = createWorker();
+  worker.trackedTrades = [
+    { accountRole: "default", strategy: "B", direction: "long", entryPrice: 5500, stopPrice: 5490, targetPrice: 5520, contractId: "CON.F.US.MES.U26", size: 2, orderId: 1, mfe: 0, mae: 0, openedAt: "t" },
+    { accountRole: "A", strategy: "A", direction: "long", entryPrice: 5500, stopPrice: 5490, targetPrice: 5520, contractId: "CON.F.US.MES.U26", size: 2, orderId: 2, mfe: 0, mae: 0, openedAt: "t" },
+  ];
+  worker.bars.push({ close: 5510 });
+  worker.openPositions = [{ contractId: "CON.F.US.MES.U26" }]; // real account: still open -> keep the "default" trade
+  worker.openPositionsA = []; // practice account: broker reports nothing -> the "A" trade closed
+
+  await worker.detectClosedTrades();
+
+  assert.equal(worker.trackedTrades.length, 1);
+  assert.equal(worker.trackedTrades[0].accountRole, "default");
+});
+
+test("closeOnDirectionFlip: only considers trades from the SAME account role as the incoming signal", async () => {
+  const worker = createWorker();
+  worker.trackedTrades = [
+    { accountRole: "A", direction: "short", contractId: "CON.F.US.MES.U26", strategy: "A" },
+  ];
+
+  // A same-contract LONG flip on the "default" role must not touch Strategy
+  // A's opposite-direction practice trade — that's a different account, and
+  // finding no "default"-role trades to close means this returns before ever
+  // touching the network.
+  await worker.closeOnDirectionFlip("real-account-id", "CON.F.US.MES.U26", "long", "default");
+
+  assert.equal(worker.trackedTrades.length, 1);
 });
 
 test("classifyPassiveClose: orphaned bracket orders still resting -> manual_close, and they get cancelled", async () => {

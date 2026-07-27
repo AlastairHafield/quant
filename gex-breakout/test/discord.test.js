@@ -78,7 +78,7 @@ test("buildDailySummaryEmbed: green when net positive, shows win rate/avg R/brea
   const embed = buildDailySummaryEmbed(summary, "2026-07-24");
   const e = embed.embeds[0];
   assert.equal(e.color, 0x2ecc71);
-  assert.match(e.description, /3 trades/);
+  assert.match(e.description, /3 real trades/);
   assert.match(e.description, /2W\/1L/);
   assert.match(e.description, /\+\$125\.00/);
   assert.ok(e.fields.some((f) => f.name === "Win rate" && f.value === "67%"));
@@ -123,6 +123,39 @@ test("buildDailySummaryEmbed: shows a manual closes field only when at least one
   };
   const e2 = buildDailySummaryEmbed(withoutManual, "2026-07-24").embeds[0];
   assert.ok(!e2.fields.some((f) => f.name === "Manual closes"));
+});
+
+test("buildDailySummaryEmbed: shows a clearly-labeled practice field only when Strategy A traded that day, never blended into the headline $", () => {
+  const withPractice = {
+    trades: {
+      totalTrades: 1, wins: 1, losses: 0, winRate: 1, totalRealizedPnl: 100, avgRMultiple: 2,
+      byStrategy: { B: { count: 1, pnl: 100 }, A: { count: 2, pnl: 3975 } },
+      manualCloses: { count: 0, wins: 0, losses: 0, pnl: 0 },
+      practice: { count: 2, wins: 1, losses: 1, pnl: 3975 },
+    },
+    vetoes: {},
+    dynamicExits: { totalValueImpact: 0, byAction: {} },
+  };
+  const embed = buildDailySummaryEmbed(withPractice, "2026-07-24").embeds[0];
+  assert.match(embed.description, /1 real trades/);
+  assert.match(embed.description, /\+\$100\.00/); // headline $ is the real $100, not $4075
+  assert.ok(
+    embed.fields.some(
+      (f) => f.name === "Practice (Strategy A, not real $)" && f.value.includes("2x (1W/1L)") && f.value.includes("$3975.00")
+    )
+  );
+
+  const withoutPractice = {
+    trades: {
+      totalTrades: 1, wins: 1, losses: 0, winRate: 1, totalRealizedPnl: 50, avgRMultiple: 1,
+      byStrategy: { B: { count: 1, pnl: 50 } }, manualCloses: { count: 0, wins: 0, losses: 0, pnl: 0 },
+      practice: { count: 0, wins: 0, losses: 0, pnl: 0 },
+    },
+    vetoes: {},
+    dynamicExits: { totalValueImpact: 0, byAction: {} },
+  };
+  const e2 = buildDailySummaryEmbed(withoutPractice, "2026-07-24").embeds[0];
+  assert.ok(!e2.fields.some((f) => f.name.startsWith("Practice")));
 });
 
 test("postDiscordEmbed: skips the network call entirely when no webhook is configured", async () => {

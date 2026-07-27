@@ -34,6 +34,11 @@ export async function openTrade(trade, dayKey) {
   const doc = {
     system: "gex-breakout",
     strategy: trade.strategy,
+    // "A" = practice account, "default" = the real Combine (shared with
+    // Mechanical ORB/Gap Continuation) — kept explicit here rather than left
+    // implicit in the strategy field, so P&L rollups can filter it out
+    // instead of silently blending fake practice money with real money.
+    accountRole: trade.accountRole ?? "default",
     direction: trade.direction,
     entryPrice: trade.entryPrice,
     stopPrice: trade.stopPrice,

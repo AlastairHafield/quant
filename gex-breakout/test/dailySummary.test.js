@@ -38,6 +38,33 @@ test("computeTradeStats: breaks out manual closes separately from bracket-driven
   assert.deepEqual(stats.manualCloses, { count: 2, wins: 1, losses: 1, pnl: 25 });
 });
 
+test("computeTradeStats: Strategy A's practice-account trades are excluded from every real-money figure", () => {
+  const trades = [
+    { status: "closed", strategy: "B", accountRole: "default", direction: "long", entryPrice: 5500, originalStopPrice: 5490, exitPrice: 5520, realizedPnl: 100 },
+    { status: "closed", strategy: "A", accountRole: "A", direction: "long", entryPrice: 5500, originalStopPrice: 5490, exitPrice: 5900, realizedPnl: 4000 }, // a huge practice "win" that must not leak into real $
+    { status: "closed", strategy: "A", accountRole: "A", direction: "long", entryPrice: 5500, originalStopPrice: 5490, exitPrice: 5495, realizedPnl: -25 },
+  ];
+  const stats = computeTradeStats(trades);
+
+  assert.equal(stats.totalTrades, 1); // only the real (default-role) trade
+  assert.equal(stats.wins, 1);
+  assert.equal(stats.losses, 0);
+  assert.equal(stats.totalRealizedPnl, 100); // the $4000 practice "win" is NOT blended in
+  assert.deepEqual(stats.practice, { count: 2, wins: 1, losses: 1, pnl: 3975 });
+  // byStrategy still shows both, for visibility into practice performance too
+  assert.deepEqual(stats.byStrategy, { B: { count: 1, pnl: 100 }, A: { count: 2, pnl: 3975 } });
+});
+
+test("computeTradeStats: a trade with no accountRole field (pre-existing data) is treated as real", () => {
+  const trades = [
+    { status: "closed", strategy: "B", direction: "long", entryPrice: 5500, originalStopPrice: 5490, exitPrice: 5520, realizedPnl: 100 },
+  ];
+  const stats = computeTradeStats(trades);
+  assert.equal(stats.totalTrades, 1);
+  assert.equal(stats.totalRealizedPnl, 100);
+  assert.deepEqual(stats.practice, { count: 0, wins: 0, losses: 0, pnl: 0 });
+});
+
 test("computeVetoBreakdown: counts vetoed signals by reason, ignores non-vetoed rows", () => {
   const signals = [
     { veto_reason: "flow_grade_F" },

@@ -80,6 +80,13 @@ export const CONFIG = {
     // separate go-live decision (2026-07-27: moved Strategy B, the general
     // level-breakout, to the real Combine; A explicitly held back).
     executionEnabled: process.env.STRATEGY_A_EXECUTION_ENABLED === "true",
+    // Strategy A trades its OWN account (the practice account), separate from
+    // everything else's TOPSTEPX_ACCOUNT_NAME (the real Combine) — worker.js
+    // routes orders/position-polling/closes per-strategy using this. Required
+    // once STRATEGY_A_EXECUTION_ENABLED is true and more than one tradable
+    // account exists — resolveAccountId refuses to guess rather than risk
+    // placing a real practice-vs-Combine order on the wrong one.
+    accountNameHint: process.env.STRATEGY_A_ACCOUNT_NAME || null,
   },
 
   strategyB: {

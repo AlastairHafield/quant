@@ -7,11 +7,21 @@
 
 export function computeTradeStats(trades) {
   const closed = trades.filter((t) => t.status === "closed" && t.realizedPnl != null);
-  const wins = closed.filter((t) => t.realizedPnl > 0);
-  const losses = closed.filter((t) => t.realizedPnl < 0);
-  const totalRealizedPnl = closed.reduce((sum, t) => sum + t.realizedPnl, 0);
 
-  const rMultiples = closed
+  // Strategy A trades on its own practice account (see worker.js's
+  // accountRoleFor) — real broker fills, but not real money. Excluded from
+  // every headline figure below so a good or bad day on the practice account
+  // never gets silently blended into the $ P&L this number is supposed to
+  // represent; still visible via byStrategy (all trades) and the separate
+  // `practice` breakdown below.
+  const real = closed.filter((t) => (t.accountRole ?? "default") !== "A");
+  const practice = closed.filter((t) => (t.accountRole ?? "default") === "A");
+
+  const wins = real.filter((t) => t.realizedPnl > 0);
+  const losses = real.filter((t) => t.realizedPnl < 0);
+  const totalRealizedPnl = real.reduce((sum, t) => sum + t.realizedPnl, 0);
+
+  const rMultiples = real
     .map((t) => {
       if (t.originalStopPrice == null || t.exitPrice == null) return null;
       const risk = Math.abs(t.entryPrice - t.originalStopPrice);
@@ -31,8 +41,9 @@ export function computeTradeStats(trades) {
 
   // Manual closes (user-initiated, outside the bot's own bracket orders — see
   // worker.js's classifyPassiveClose) broken out separately so it's possible to
-  // see, over time, whether stepping in helps or hurts vs. leaving the bracket alone.
-  const manualClosed = closed.filter((t) => t.outcome === "manual_close");
+  // see, over time, whether stepping in helps or hurts vs. leaving the bracket
+  // alone. Scoped to `real` for the same reason as the headline figures above.
+  const manualClosed = real.filter((t) => t.outcome === "manual_close");
   const manualCloses = {
     count: manualClosed.length,
     wins: manualClosed.filter((t) => t.realizedPnl > 0).length,
@@ -40,15 +51,23 @@ export function computeTradeStats(trades) {
     pnl: manualClosed.reduce((sum, t) => sum + t.realizedPnl, 0),
   };
 
+  const practiceStats = {
+    count: practice.length,
+    wins: practice.filter((t) => t.realizedPnl > 0).length,
+    losses: practice.filter((t) => t.realizedPnl < 0).length,
+    pnl: practice.reduce((sum, t) => sum + t.realizedPnl, 0),
+  };
+
   return {
-    totalTrades: closed.length,
+    totalTrades: real.length,
     wins: wins.length,
     losses: losses.length,
-    winRate: closed.length ? wins.length / closed.length : null,
+    winRate: real.length ? wins.length / real.length : null,
     totalRealizedPnl,
     avgRMultiple,
     byStrategy,
     manualCloses,
+    practice: practiceStats,
   };
 }
 

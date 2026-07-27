@@ -73,10 +73,20 @@ export function buildDailySummaryEmbed(summary, dayKey) {
     const mc = trades.manualCloses;
     fields.push(["Manual closes", `${mc.count}x (${mc.wins}W/${mc.losses}L), ${mc.pnl >= 0 ? "+" : ""}$${mc.pnl.toFixed(2)}`]);
   }
+  // Strategy A trades its own practice account — kept out of every figure
+  // above (real money only) and shown here separately, clearly labeled, so
+  // it's never mistaken for part of the real P&L.
+  if (trades.practice?.count > 0) {
+    const p = trades.practice;
+    fields.push([
+      "Practice (Strategy A, not real $)",
+      `${p.count}x (${p.wins}W/${p.losses}L), ${p.pnl >= 0 ? "+" : ""}$${p.pnl.toFixed(2)}`,
+    ]);
+  }
 
   return buildSignalEmbed({
     title: `📊 Daily Summary — GEX Breakout · ${dayKey}`,
-    description: `${trades.totalTrades} trades, ${trades.wins}W/${trades.losses}L — ${pnlSign}$${trades.totalRealizedPnl.toFixed(2)}`,
+    description: `${trades.totalTrades} real trades, ${trades.wins}W/${trades.losses}L — ${pnlSign}$${trades.totalRealizedPnl.toFixed(2)}`,
     color: trades.totalRealizedPnl >= 0 ? 0x2ecc71 : 0xe74c3c,
     fields,
     footerText: `GEX Breakout · daily summary · ${new Date().toISOString()}`,
