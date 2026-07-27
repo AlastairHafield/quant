@@ -48,6 +48,25 @@ test("Worker: ADX not confirmed vetoes the day even with a real gap", () => {
   assert.equal(worker.logger.buffer[0].veto_reason, "adx_below_threshold");
 });
 
+test("handleSignal: skips a new signal when the account already has an open position (shared with other bots)", () => {
+  const worker = primedWorker({ priorClose: 100 });
+  worker.openPositions = [{ contractId: "CON.F.US.MES.U26", size: 4 }]; // e.g. GEX Breakout or Mechanical ORB
+
+  worker.handleSignal({ direction: "long", entryPrice: 101.1, stopPrice: 100.5, targetPrice: 102, gapPct: 0.01 });
+
+  assert.equal(worker.logger.buffer[0].veto_reason, "position_already_open");
+  assert.equal(worker.openPosition, null);
+});
+
+test("handleSignal: proceeds normally when the account is flat", () => {
+  const worker = primedWorker({ priorClose: 100 });
+  worker.openPositions = [];
+
+  worker.handleSignal({ direction: "long", entryPrice: 101.1, stopPrice: 100.5, targetPrice: 102, gapPct: 0.01 });
+
+  assert.equal(worker.logger.buffer[0].veto_reason, null);
+});
+
 test("Worker: a gap UP with ADX confirmed opens a LONG position (signal-only mode)", () => {
   const worker = primedWorker({ priorClose: 100 });
   worker.onBar(bar(101, 101.2, 100.9, 101.1), new Date(2026, 6, 27, 9, 30));

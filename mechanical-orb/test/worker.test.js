@@ -61,6 +61,25 @@ test("Worker: a breakout without ADX confirmation is vetoed and does not mark th
   assert.equal(row.veto_reason, "adx_below_threshold");
 });
 
+test("handleSignal: skips a new signal when the account already has an open position (shared with other bots)", () => {
+  const worker = primedWorker({ adxOk: true });
+  worker.openPositions = [{ contractId: "CON.F.US.MES.U26", size: 4 }]; // e.g. GEX Breakout or Gap Continuation
+
+  worker.handleSignal({ direction: "long", entryPrice: 5522, stopPrice: 5518 });
+
+  assert.equal(worker.logger.buffer[0].veto_reason, "position_already_open");
+  assert.equal(worker.dayState.tradedToday, false);
+});
+
+test("handleSignal: proceeds normally when the account is flat", () => {
+  const worker = primedWorker({ adxOk: true });
+  worker.openPositions = [];
+
+  worker.handleSignal({ direction: "long", entryPrice: 5522, stopPrice: 5518 });
+
+  assert.equal(worker.logger.buffer[0].veto_reason, null);
+});
+
 test("Worker: once a position is open, subsequent bars don't re-evaluate entries (one trade per day)", () => {
   const worker = primedWorker({ adxOk: true });
   worker.onBar(bar(5523, 5520, 5522), new Date(2026, 6, 24, 9, 50)); // enters

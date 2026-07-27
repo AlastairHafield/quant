@@ -239,13 +239,23 @@ export class Worker {
   }
 
   handleSignal(result) {
+    // Shared with GEX Breakout and Mechanical ORB on the same real account/
+    // MES contract, with no coordination between them on position sizing —
+    // stacking a second position on top of an already-open one (this bot's own,
+    // or another bot's) compounds risk beyond what any single strategy was
+    // sized for. this.openPositions is the real broker account state (refreshed
+    // every poll), so this catches a position opened by another bot too, not
+    // just this one's own (which onBar's `if (this.openPosition) return`
+    // already short-circuits before evaluateEntry is even called).
+    const vetoReason = this.openPositions.length > 0 ? "position_already_open" : result.veto;
+
     const row = buildLogRow({
       ts: new Date().toISOString(),
       direction: result.direction,
       adx: this.priorDayAdx,
       priorClose: this.priorClose,
       gapPct: result.gapPct,
-      vetoReason: result.veto,
+      vetoReason,
       entryPrice: result.entryPrice,
       stopPrice: result.stopPrice,
       targetPrice: result.targetPrice,
@@ -253,7 +263,7 @@ export class Worker {
     this.logger.log(row);
     tradeJournal.logSignal(row, nowET().toDateString()).catch((e) => console.error("Mongo log failed:", e.message));
 
-    if (result.veto) return; // vetoes are logged only, no alert noise
+    if (vetoReason) return; // vetoes are logged only, no alert noise
 
     this.executeEntry(result).catch((e) => console.error("Entry execution failed:", e.message));
   }
