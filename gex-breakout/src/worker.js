@@ -1161,6 +1161,27 @@ export function createWorker() {
   return new Worker();
 }
 
+// On a fresh dyno boot, the very first WebSocket handshake to TopstepX's
+// SignalR market-data hub sometimes fails (FailedToStartTransportError) —
+// looks like a brief networking-readiness race right at container startup.
+// subscribeBars' own .withAutomaticReconnect() only covers reconnecting
+// AFTER a previously-successful connection drops, not this initial handshake
+// — an unretried failure here was an unhandled rejection that crashed the
+// whole process, with Heroku's own crash-restart acting as the de facto
+// (and much slower) retry mechanism (confirmed live 2026-07-28). Same fix as
+// gap-continuation's subscribeBarsWithRetry — linear backoff, no attempt
+// cap, since without market data this bot can't do anything anyway.
+async function subscribeBarsWithRetry(worker, attempt = 1) {
+  try {
+    await topstepx.subscribeBars(CONFIG.instrumentData, (bar) => worker.onBar(bar));
+  } catch (e) {
+    const waitMs = Math.min(5000 * attempt, 60000);
+    console.error(`subscribeBars failed (attempt ${attempt}): ${e.message} — retrying in ${waitMs / 1000}s`);
+    await new Promise((resolve) => setTimeout(resolve, waitMs));
+    return subscribeBarsWithRetry(worker, attempt + 1);
+  }
+}
+
 async function startWorker() {
   const worker = createWorker();
   console.log(`gex-breakout worker starting — signal-only mode: ${!CONFIG.executionEnabled}`);
@@ -1187,7 +1208,7 @@ async function startWorker() {
     () => worker.pollAccount().catch((e) => console.error("Account poll failed:", e.message)),
     5000
   );
-  await topstepx.subscribeBars(CONFIG.instrumentData, (bar) => worker.onBar(bar));
+  await subscribeBarsWithRetry(worker);
 
   // Reads "already flushed today" from Mongo rather than an in-memory flag —
   // a restart used to reset that flag to null and, if the restart happened
