@@ -19,7 +19,7 @@ function todayEtDayKey() {
 // posted once, at end of day) — so "today so far" still shows real numbers
 // instead of a blank state until the scheduled flush catches up.
 function computeLiveStats(trades) {
-  const closed = trades.filter((t) => t.status === 'closed' && t.realizedPnl != null);
+  const closed = trades.filter((t) => t.status === 'closed' && t.realizedPnl != null && !t.excludedFromStats);
   const real = closed.filter((t) => (t.accountRole ?? 'default') !== 'A');
   const wins = real.filter((t) => t.realizedPnl > 0);
   const losses = real.filter((t) => t.realizedPnl < 0);
@@ -212,6 +212,14 @@ export default function TradeJournal() {
                     <td style={{ fontFamily: 'var(--mono)', fontSize: 10, color: 'var(--text3)' }}>{t.outcome ?? (t.status === 'open' ? 'open' : '—')}</td>
                     <td style={{ fontFamily: 'var(--mono)', fontSize: 11, color: t.realizedPnl >= 0 ? 'var(--green)' : t.realizedPnl < 0 ? 'var(--red)' : undefined }}>
                       {fmtUsd(t.realizedPnl)}
+                      {t.excludedFromStats && (
+                        <span
+                          title={t.excludedReason || 'excluded from stats'}
+                          style={{ marginLeft: 6, color: 'var(--yellow)', fontSize: 9 }}
+                        >
+                          ⚠ excluded
+                        </span>
+                      )}
                     </td>
                     <td style={{ fontFamily: 'var(--mono)', fontSize: 11 }}>{r(t.mfe)}</td>
                     <td style={{ fontFamily: 'var(--mono)', fontSize: 11 }}>{r(t.mae)}</td>

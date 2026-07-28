@@ -6,7 +6,13 @@
 // by worker.js's existing scheduled-flush interval.
 
 export function computeTradeStats(trades) {
-  const closed = trades.filter((t) => t.status === "closed" && t.realizedPnl != null);
+  // excludedFromStats: a manual, one-off tag for a trade that's a data-quality
+  // incident, not real strategy performance (e.g. the 2026-07-28 ladder-sizing
+  // bug's two 30-contract Strategy B trades) — the doc stays in Mongo as an
+  // accurate historical record (still visible in the raw Trade Journal table),
+  // but is left out of every aggregate below entirely, byStrategy included,
+  // since including it would still misrepresent the strategy's real behavior.
+  const closed = trades.filter((t) => t.status === "closed" && t.realizedPnl != null && !t.excludedFromStats);
 
   // Strategy A trades on its own practice account (see worker.js's
   // accountRoleFor) — real broker fills, but not real money. Excluded from

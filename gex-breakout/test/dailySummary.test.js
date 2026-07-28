@@ -65,6 +65,18 @@ test("computeTradeStats: a trade with no accountRole field (pre-existing data) i
   assert.deepEqual(stats.practice, { count: 0, wins: 0, losses: 0, pnl: 0 });
 });
 
+test("computeTradeStats: excludedFromStats trades are left out of every aggregate entirely, byStrategy included", () => {
+  const trades = [
+    { status: "closed", strategy: "B", direction: "short", entryPrice: 7437, exitPrice: 7437.5, realizedPnl: -75, excludedFromStats: true, excludedReason: "2026-07-28 ladder sizing bug" },
+    { status: "closed", strategy: "B", direction: "short", entryPrice: 7429.5, exitPrice: 7430.5, realizedPnl: -150, excludedFromStats: true, excludedReason: "2026-07-28 ladder sizing bug" },
+    { status: "closed", strategy: "B", direction: "long", entryPrice: 5500, originalStopPrice: 5490, exitPrice: 5520, realizedPnl: 100 },
+  ];
+  const stats = computeTradeStats(trades);
+  assert.equal(stats.totalTrades, 1); // only the one non-excluded trade
+  assert.equal(stats.totalRealizedPnl, 100); // the two -$75/-$150 bug trades are not blended in
+  assert.deepEqual(stats.byStrategy, { B: { count: 1, pnl: 100 } }); // excluded trades don't even show up here
+});
+
 test("computeVetoBreakdown: counts vetoed signals by reason, ignores non-vetoed rows", () => {
   const signals = [
     { veto_reason: "flow_grade_F" },
