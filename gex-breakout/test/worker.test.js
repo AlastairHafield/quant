@@ -196,6 +196,63 @@ function esBar({ high, low, close, buyVolume, sellVolume }) {
   return { high, low, close, volume: buyVolume + sellVolume, buyVolume, sellVolume };
 }
 
+test("checkDayRollover: resets ORB state, pending breakouts, and risk-manager day-state on a new calendar day", () => {
+  const worker = createWorker();
+  worker.currentDay = new Date(2026, 6, 27).toDateString();
+  worker.orbHigh = 5520;
+  worker.orbLow = 5510;
+  worker.orbLocked = true;
+  worker.orbBackfillInFlight = true;
+  worker.pendingA = { direction: "long" };
+  worker.pendingB = { direction: "short" };
+  worker.riskManager.recordTradeResult("A", -100); // a loss recorded yesterday
+  worker.riskManager.recordOrbTrade("long");
+
+  worker.checkDayRollover(new Date(2026, 6, 28, 0, 1)); // just past midnight, a new day
+
+  assert.equal(worker.currentDay, new Date(2026, 6, 28).toDateString());
+  assert.equal(worker.orbHigh, null);
+  assert.equal(worker.orbLow, null);
+  assert.equal(worker.orbLocked, false);
+  assert.equal(worker.orbBackfillInFlight, false);
+  assert.equal(worker.pendingA, null);
+  assert.equal(worker.pendingB, null);
+  assert.equal(worker.riskManager.lossesToday.A, 0);
+  assert.equal(worker.riskManager.orbTradedDirections.size, 0);
+});
+
+test("checkDayRollover: a no-op when called again the same day (doesn't wipe an in-progress ORB build)", () => {
+  const worker = createWorker();
+  worker.currentDay = new Date(2026, 6, 27).toDateString();
+  worker.orbHigh = 5520;
+  worker.orbLow = 5510;
+
+  worker.checkDayRollover(new Date(2026, 6, 27, 9, 40)); // still the same day
+
+  assert.equal(worker.orbHigh, 5520);
+  assert.equal(worker.orbLow, 5510);
+});
+
+test("onBar: a stale orbLocked=true from a late-day backfill on one day does not carry into the next day's pre-market bars (caught live 2026-07-28)", () => {
+  const worker = createWorker();
+  // Simulates exactly what happened live: a worker restart late on day 1
+  // backfills that day's already-completed ORB, locking it — nothing used to
+  // reset this before the next calendar day's pre-market bars arrived.
+  worker.currentDay = new Date(2026, 6, 27).toDateString();
+  worker.orbHigh = 5520;
+  worker.orbLow = 5510;
+  worker.orbLocked = true;
+  worker.gexSnapshot = { netGex: -5e9, flipPoint: 5500, walls: { aboveSpot: [], belowSpot: [] }, confidence: "FULL" };
+  worker.basis = 0;
+  worker.rebuildLevels();
+
+  // A pre-market bar on the NEXT day, well before the real 9:30 ET session.
+  worker.onBar(esBar({ high: 5525, low: 5522, close: 5524, buyVolume: 100, sellVolume: 10 }), new Date(2026, 6, 28, 4, 6));
+
+  assert.equal(worker.orbLocked, false); // reset by day rollover
+  assert.equal(worker.logger.size, 0); // evaluateSignals never ran — no signal, no trade
+});
+
 test("Worker end-to-end: a clean NEG_GAMMA ORB breakout with strong flow produces a non-vetoed Strategy A signal", () => {
   const worker = createWorker();
   worker.gexSnapshot = {

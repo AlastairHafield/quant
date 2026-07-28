@@ -117,14 +117,24 @@ export const CONFIG = {
     sizing: {
       A: 4,
       B: 2,
-      // Scales the A/B base sizes above by ladderContracts(equity)/ladder.baseContracts
-      // as account equity grows, preserving A's 2x-of-B ratio and the wall-proximity
-      // multiplier rather than replacing them with a flat count (topstep-prop-firm-plan
-      // Phase 3: 1 contract base, +1 per $2,000 of equity growth, capped at 15).
+      // Scales Strategy B's base size above by ladderContracts(equity)/ladder.baseContracts
+      // as account equity grows, preserving the wall-proximity multiplier rather than
+      // replacing it with a flat count (topstep-prop-firm-plan Phase 3: 1 contract base,
+      // +1 per $2,000 of equity growth, capped at 15).
+      // startingEquity MUST be this specific account's actual nominal starting balance,
+      // not a generic reference value — the Phase 3 plan's $2,000 figure was written for
+      // an eventual real PERSONAL account, not this $50K Combine (account name "50KTC").
+      // Bug caught live 2026-07-28: with startingEquity left at $2,000 against a real
+      // ~$49,587 Combine balance, the ladder read that as "grown from $2K to $50K" and
+      // instantly maxed out at the 15x cap — two real Strategy B trades fired at 30
+      // contracts (2 base x 15x) instead of ~2. Only Strategy B uses this; Strategy A
+      // trades the practice account (an arbitrary, not-necessarily-stable balance) and
+      // stays flat (ratio 1x, see worker.js's handleSignal) until practice-account
+      // sizing gets its own deliberate calibration.
       ladder: {
         baseContracts: 1,
         perContractEquityStep: 2000,
-        startingEquity: 2000,
+        startingEquity: 50000,
         cap: 15,
       },
     },

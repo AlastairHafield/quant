@@ -189,6 +189,7 @@ export class Worker {
     this.riskManager = new SessionRiskManager(CONFIG);
     this.logger = new SignalLogger();
     this.bars = [];
+    this.currentDay = null;
     this.orbHigh = null;
     this.orbLow = null;
     this.orbLocked = false;
@@ -469,7 +470,32 @@ export class Worker {
     this.rebuildLevels();
   }
 
+  // Nothing previously reset orbHigh/orbLow/orbLocked/pendingA/pendingB/
+  // riskManager's day-state (win/loss halts, ORB-traded directions, level
+  // cooldowns) at a new day — once locked, orbLocked stayed true forever, so
+  // a worker that started late one day (backfilling that day's already-
+  // completed ORB) would carry orbLocked=true straight through the night,
+  // letting evaluateSignals run on pre-market bars the next calendar day
+  // using yesterday's stale ORB range (confirmed live 2026-07-28: two real
+  // Strategy B trades fired around 04:06/04:38 UTC, hours before the real
+  // 9:30 ET session open, on an account that hadn't restarted since before
+  // midnight). SessionRiskManager.resetDay() already existed for exactly
+  // this but was never actually called anywhere after construction.
+  checkDayRollover(t) {
+    const dayKey = t.toDateString();
+    if (this.currentDay === dayKey) return;
+    this.currentDay = dayKey;
+    this.orbHigh = null;
+    this.orbLow = null;
+    this.orbLocked = false;
+    this.orbBackfillInFlight = false;
+    this.pendingA = null;
+    this.pendingB = null;
+    this.riskManager.resetDay();
+  }
+
   onBar(rawBar, t = nowET()) {
+    this.checkDayRollover(t);
     const prevCum = this.bars.length ? this.bars[this.bars.length - 1].cumDelta : 0;
     const delta = rawBar.buyVolume - rawBar.sellVolume;
     const bar = { ...rawBar, delta, cumDelta: prevCum + delta };
@@ -742,13 +768,19 @@ export class Worker {
 
     if (vetoReason) return; // vetoes are logged only, no alert noise
 
-    // account.balance isn't known yet before the first poll — starts at the
-    // ladder's own startingEquity (1 contract) rather than guessing high.
-    const account = role === "A" ? this.accountA : this.account;
-    const equity = account?.balance ?? CONFIG.risk.sizing.ladder.startingEquity;
-    const size =
-      computeSizeMultiplier(flow.grade, result.sizeMultiplier, CONFIG.risk.sizing) *
-      ladderRatio(equity, CONFIG.risk.sizing.ladder);
+    // Ladder only applies to Strategy B (the real Combine, whose actual
+    // starting balance is known and calibrated — see config.js's
+    // sizing.ladder.startingEquity comment). Strategy A's practice account
+    // balance is arbitrary and not calibrated against this ladder, so it
+    // stays flat (ratio 1x, i.e. just its own base x wall multiplier) rather
+    // than risk the exact same class of oversizing bug against an unverified
+    // number.
+    let ratio = 1;
+    if (role === "default") {
+      const equity = this.account?.balance ?? CONFIG.risk.sizing.ladder.startingEquity;
+      ratio = ladderRatio(equity, CONFIG.risk.sizing.ladder);
+    }
+    const size = computeSizeMultiplier(flow.grade, result.sizeMultiplier, CONFIG.risk.sizing) * ratio;
     this.executeSignal(result, regimeInfo, flow, size).catch((e) =>
       console.error("Signal execution failed:", e.message)
     );
