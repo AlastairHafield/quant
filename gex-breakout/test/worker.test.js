@@ -649,6 +649,20 @@ test("logClosedTrade: a manual_close outcome is logged distinctly and still feed
   assert.ok(row, "expected a manual_close log row");
 });
 
+test("notifyManualTradeDetected: does not throw when called with a constructed trade", () => {
+  const worker = createWorker();
+  assert.doesNotThrow(() =>
+    worker.notifyManualTradeDetected({ accountRole: "default", direction: "long", size: 5, entryPrice: 7432.75 })
+  );
+});
+
+test("notifyManualClose: does not throw when called with a constructed trade and a realized P&L", () => {
+  const worker = createWorker();
+  assert.doesNotThrow(() =>
+    worker.notifyManualClose({ strategy: "B", direction: "long", entryPrice: 7432.75, size: 5 }, 7450, 431.25)
+  );
+});
+
 test("confirmRealEntryPrice: corrects entry/stop/target to the broker's real fill, preserving the R-distance", async () => {
   const worker = createWorker();
   const trade = { entryPrice: 5500, stopPrice: 5490, targetPrice: 5520, mongoId: null };
