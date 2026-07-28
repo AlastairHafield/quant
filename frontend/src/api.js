@@ -33,8 +33,9 @@ export const getORBTrades = (id) => api.get(`/orb/backtest/runs/${id}/trades`).t
 // own, so it pushes its status to the backend and we read it back from there.
 export const getGexBreakoutStatus = () => api.get('/gex-breakout/status').then(r => r.data);
 export const getMechanicalOrbStatus = () => api.get('/mechanical-orb/status').then(r => r.data);
+export const getGapContinuationStatus = () => api.get('/gap-continuation/status').then(r => r.data);
 export const getORBSweep = (sweepId) => api.get(`/orb/sweeps/${sweepId}`).then(r => r.data);
 
-export const getTradeJournalTrades = () => api.get('/trade-journal/trades').then(r => r.data);
-export const getTradeJournalExitActions = () => api.get('/trade-journal/exit-actions').then(r => r.data);
+export const getTradeJournalTrades = (params) => api.get('/trade-journal/trades', { params }).then(r => r.data);
+export const getTradeJournalExitActions = (params) => api.get('/trade-journal/exit-actions', { params }).then(r => r.data);
 export const getTradeJournalDailySummaries = () => api.get('/trade-journal/daily-summaries').then(r => r.data);

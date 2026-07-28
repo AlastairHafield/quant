@@ -401,7 +401,10 @@ router.get('/gap-continuation/status', (req, res) => {
 
 router.get('/trade-journal/trades', async (req, res) => {
   try {
-    const trades = await fetchTrades({ dayKey: req.query.dayKey || undefined });
+    const trades = await fetchTrades({
+      dayKey: req.query.dayKey || undefined,
+      accountRole: req.query.accountRole || undefined,
+    });
     res.json({ success: true, data: trades });
   } catch (e) {
     res.status(500).json({ success: false, error: e.message });

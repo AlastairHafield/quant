@@ -25,6 +25,9 @@ test("buildStatusPayload: sane defaults before any data has arrived", () => {
   assert.equal(payload.account, null);
   assert.deepEqual(payload.openPositions, []);
   assert.equal(payload.accountAsOf, null);
+  assert.equal(payload.strategyA.signalOnly, true);
+  assert.equal(payload.strategyA.account, null);
+  assert.deepEqual(payload.strategyA.openPositions, []);
 });
 
 test("buildStatusPayload: reflects live account balance/positions once polled", () => {
@@ -37,6 +40,22 @@ test("buildStatusPayload: reflects live account balance/positions once polled", 
   assert.deepEqual(payload.account, { id: 25804787, name: "PRAC-V2-416538-98727790", balance: 150000 });
   assert.equal(payload.openPositions.length, 1);
   assert.equal(payload.accountAsOf, "2026-07-24T14:00:00.000Z");
+});
+
+test("buildStatusPayload: strategyA reports its OWN (practice) account, independent of the default account above", () => {
+  const worker = createWorker();
+  worker.account = { id: 1, name: "REAL", balance: 49586.83 };
+  worker.openPositions = [{ id: 1, contractId: "CON.F.US.MES.U26", size: 2, averagePrice: 5500, type: 1 }];
+  worker.accountA = { id: 2, name: "PRAC-V2-416538-98727790", balance: 149989.47 };
+  worker.openPositionsA = [{ id: 2, contractId: "CON.F.US.MES.U26", size: 4, averagePrice: 5490, type: 2 }];
+
+  const payload = buildStatusPayload(worker);
+  assert.deepEqual(payload.strategyA.account, { id: 2, name: "PRAC-V2-416538-98727790", balance: 149989.47 });
+  assert.equal(payload.strategyA.openPositions.length, 1);
+  assert.equal(payload.strategyA.openPositions[0].size, 4);
+  // The "default" account fields are untouched by strategyA's own state
+  assert.equal(payload.account.balance, 49586.83);
+  assert.equal(payload.openPositions.length, 1);
 });
 
 test("buildStatusPayload: reflects live GEX/basis/regime/day-state once populated", () => {

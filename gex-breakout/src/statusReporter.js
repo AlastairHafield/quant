@@ -3,7 +3,7 @@ import { CONFIG } from "./config.js";
 export function buildStatusPayload(worker) {
   const lastBar = worker.bars.length ? worker.bars[worker.bars.length - 1] : null;
   return {
-    signalOnly: !CONFIG.executionEnabled,
+    signalOnly: !CONFIG.executionEnabled, // Strategy B (and everything but A) — the bot-wide switch
     instrumentTrade: CONFIG.instrumentTrade,
     instrumentData: CONFIG.instrumentData,
     lastPrice: lastBar?.close ?? null,
@@ -33,6 +33,16 @@ export function buildStatusPayload(worker) {
       : null,
     openPositions: worker.openPositions,
     accountAsOf: worker.accountAsOf ? worker.accountAsOf.toISOString() : null,
+    // Strategy A's own (practice) account — separate from everything above,
+    // which is the "default" role (real Combine). See worker.js's
+    // accountRoleFor/isLiveExecutionAllowed for how the two stay isolated.
+    strategyA: {
+      signalOnly: !(CONFIG.executionEnabled && CONFIG.strategyA.executionEnabled),
+      account: worker.accountA
+        ? { id: worker.accountA.id, name: worker.accountA.name, balance: worker.accountA.balance }
+        : null,
+      openPositions: worker.openPositionsA,
+    },
     recentLog: worker.logger.buffer.slice(-50).reverse(),
     updatedAt: new Date().toISOString(),
   };
