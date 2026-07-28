@@ -97,11 +97,9 @@ export default function StrategyConfig() {
 
 function Row({ label, value }) {
   return (
-    <div style={{ display: 'flex', gap: 16, padding: '6px 0', borderBottom: '1px solid var(--border)' }}>
-      <span style={{ color: 'var(--text3)', fontFamily: 'var(--mono)', fontSize: 11, minWidth: 190, flexShrink: 0 }}>
-        {label}
-      </span>
-      <span style={{ fontFamily: 'var(--mono)', fontSize: 12 }}>{value}</span>
+    <div className="config-row">
+      <span className="config-row-label">{label}</span>
+      <span className="config-row-value">{value}</span>
     </div>
   );
 }

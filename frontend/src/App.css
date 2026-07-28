@@ -27,6 +27,7 @@ body {
   font-size: 13px;
   line-height: 1.5;
   -webkit-font-smoothing: antialiased;
+  overflow-x: hidden; /* wide content (tables etc.) scrolls in its own .table-wrap, not the page */
 }
 
 .app {
@@ -411,6 +412,57 @@ tbody tr:hover td {
 .btn:disabled {
   opacity: 0.4;
   cursor: not-allowed;
+}
+
+/* Sub-nav tab row (e.g. Live Dashboard's strategy tabs) — wraps onto extra
+   rows on narrow screens instead of overflowing the viewport horizontally. */
+.strat-tabs {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-bottom: 20px;
+}
+
+@media (max-width: 640px) {
+  .strat-tab {
+    padding: 8px 12px;
+    font-size: 10px;
+    flex: 1 1 calc(50% - 4px);
+    justify-content: center;
+  }
+}
+
+/* Label/value reference rows (e.g. Strategy Config) — side by side on a
+   normal-width screen, stacked on mobile so long values don't get squeezed
+   into a narrow remaining column. */
+.config-row {
+  display: flex;
+  gap: 16px;
+  padding: 6px 0;
+  border-bottom: 1px solid var(--border);
+}
+
+.config-row-label {
+  color: var(--text3);
+  font-family: var(--mono);
+  font-size: 11px;
+  min-width: 190px;
+  flex-shrink: 0;
+}
+
+.config-row-value {
+  font-family: var(--mono);
+  font-size: 12px;
+}
+
+@media (max-width: 640px) {
+  .config-row {
+    flex-direction: column;
+    gap: 4px;
+  }
+  .config-row-label {
+    min-width: 0;
+  }
 }
 
 /* STATUS MESSAGES */
