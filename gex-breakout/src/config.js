@@ -19,6 +19,11 @@ export const CONFIG = {
 
   gexRecalcMin: 15,
   basisRecalcMin: 5,
+  // If no bars arrive for this long during the trading day, worker.js's
+  // watchdog forces a SignalR reconnect (see isBarStreamStale) — bars should
+  // arrive roughly every minute, so 3x that comfortably absorbs a normal
+  // brief lull without false-triggering on real quiet periods.
+  barStaleThresholdMin: 3,
 
   gex: {
     // GEX_strike = gamma * OI * 100 * spot^2 * 0.01

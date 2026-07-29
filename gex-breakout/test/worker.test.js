@@ -15,6 +15,7 @@ import {
   createWorker,
   isLiveExecutionAllowed,
   accountRoleFor,
+  isBarStreamStale,
 } from "../src/worker.js";
 import { CONFIG } from "../src/config.js";
 
@@ -38,6 +39,25 @@ test("accountRoleFor: Strategy A gets its own role, everything else is 'default'
 test("isLiveExecutionAllowed: Strategy B (and anything else) just follows the bot-wide switch", () => {
   assert.equal(isLiveExecutionAllowed("B", { executionEnabled: true, strategyA: { executionEnabled: false } }), true);
   assert.equal(isLiveExecutionAllowed("B", { executionEnabled: false, strategyA: { executionEnabled: false } }), false);
+});
+
+test("isBarStreamStale: false outside the trading day, regardless of how old the last bar is", () => {
+  const veryOld = new Date(2026, 6, 29, 6, 0); // 6am ET, market not open yet
+  const now = new Date(2026, 6, 29, 8, 0); // 8am ET, still not open
+  assert.equal(isBarStreamStale(veryOld, now, CONFIG), false);
+});
+
+test("isBarStreamStale: false when no bar has ever been received yet (subscribeBarsWithRetry's own retry covers a failed initial connect)", () => {
+  const now = new Date(2026, 6, 29, 10, 0); // 10am ET, within the trading day
+  assert.equal(isBarStreamStale(null, now, CONFIG), false);
+});
+
+test("isBarStreamStale: false when the last bar is recent, true once it exceeds the threshold, during the trading day", () => {
+  const now = new Date(2026, 6, 29, 10, 0); // 10am ET
+  const recent = new Date(2026, 6, 29, 9, 58); // 2 min ago
+  const stale = new Date(2026, 6, 29, 9, 55); // 5 min ago, threshold is 3
+  assert.equal(isBarStreamStale(recent, now, CONFIG), false);
+  assert.equal(isBarStreamStale(stale, now, CONFIG), true);
 });
 
 test("orbWindowBounds derives the [open, open+window) range from config", () => {

@@ -90,6 +90,26 @@ export function shouldFlattenNow(t, config) {
   return minutesOf(t) >= config.flattenAtET.h * 60 + config.flattenAtET.m;
 }
 
+// Bars should arrive roughly every minute during the trading day — if none
+// have for a while, the SignalR bar subscription may have gone "zombie"
+// (technically still connected but no longer delivering data), which
+// .withAutomaticReconnect() can't detect on its own since it only reacts to
+// an actual disconnect event, not a lack of messages. Confirmed live
+// 2026-07-29: bars silently stopped for over an hour while the separate
+// REST-based account polling kept working fine, masking the failure — the
+// bot wasn't evaluating anything that whole stretch, not just missing
+// Strategy B's narrower trigger. Only checked during the trading day itself;
+// a long quiet gap overnight/on weekends is normal, not a failure.
+export function isBarStreamStale(lastBarReceivedAt, now, config) {
+  const withinTradingDay =
+    minutesOf(now) >= config.sessionOpenET.h * 60 + config.sessionOpenET.m &&
+    minutesOf(now) < config.sessionEndET.h * 60 + config.sessionEndET.m;
+  if (!withinTradingDay) return false;
+  if (lastBarReceivedAt == null) return false; // never connected yet — subscribeBarsWithRetry's own retry covers this
+  const staleMs = now.getTime() - lastBarReceivedAt.getTime();
+  return staleMs > config.barStaleThresholdMin * 60_000;
+}
+
 // Returns the day-key to flush for if it's at/past the scheduled flush time,
 // else null — pure, so the "is it time" logic is testable separately from
 // the setInterval wiring that calls it. Whether that day has already been
@@ -218,6 +238,7 @@ export class Worker {
     this.openPositionsA = [];
     this.accountAsOf = null;
     this.trackedTrades = []; // locally-tracked open trades, for MFE/MAE + closure detection
+    this.lastBarReceivedAt = null; // real wall-clock time — see isBarStreamStale
   }
 
   async resolveAccountIdForRole(role) {
@@ -546,6 +567,7 @@ export class Worker {
   }
 
   onBar(rawBar, t = nowET()) {
+    this.lastBarReceivedAt = new Date(); // real wall-clock time, not `t` — see isBarStreamStale
     this.checkDayRollover(t);
     const prevCum = this.bars.length ? this.bars[this.bars.length - 1].cumDelta : 0;
     const delta = rawBar.buyVolume - rawBar.sellVolume;
@@ -1222,9 +1244,11 @@ export function createWorker() {
 // (and much slower) retry mechanism (confirmed live 2026-07-28). Same fix as
 // gap-continuation's subscribeBarsWithRetry — linear backoff, no attempt
 // cap, since without market data this bot can't do anything anyway.
+// Returns the live connection so the staleness watchdog below can stop() it
+// and reconnect if bars ever go quiet mid-session.
 async function subscribeBarsWithRetry(worker, attempt = 1) {
   try {
-    await topstepx.subscribeBars(CONFIG.instrumentData, (bar) => worker.onBar(bar));
+    return await topstepx.subscribeBars(CONFIG.instrumentData, (bar) => worker.onBar(bar));
   } catch (e) {
     const waitMs = Math.min(5000 * attempt, 60000);
     console.error(`subscribeBars failed (attempt ${attempt}): ${e.message} — retrying in ${waitMs / 1000}s`);
@@ -1259,7 +1283,22 @@ async function startWorker() {
     () => worker.pollAccount().catch((e) => console.error("Account poll failed:", e.message)),
     5000
   );
-  await subscribeBarsWithRetry(worker);
+  let barConnection = await subscribeBarsWithRetry(worker);
+
+  // Forces a fresh SignalR connection if bars go quiet mid-session — see
+  // isBarStreamStale. .stop() before reconnecting so the old (zombie)
+  // connection doesn't linger duplicating GatewayTrade handlers.
+  setInterval(async () => {
+    if (!isBarStreamStale(worker.lastBarReceivedAt, nowET(), CONFIG)) return;
+    const staleMin = Math.round((Date.now() - worker.lastBarReceivedAt.getTime()) / 60_000);
+    console.error(`No bars received in ~${staleMin}min during the trading day — forcing a SignalR reconnect`);
+    try {
+      await barConnection.stop();
+    } catch (e) {
+      console.error("Error stopping stale bar connection:", e.message);
+    }
+    barConnection = await subscribeBarsWithRetry(worker);
+  }, 60_000);
 
   // Reads "already flushed today" from Mongo rather than an in-memory flag —
   // a restart used to reset that flag to null and, if the restart happened
