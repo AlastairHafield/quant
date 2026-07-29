@@ -1,3 +1,8 @@
+// The two strategies with a real day-state identity to halt — "reconciled"
+// (a position this process didn't itself open, e.g. a manual trade) and
+// anything else intentionally has none, same no-op as before.
+const TRACKED_STRATEGIES = new Set(["B", "OF"]);
+
 export class SessionRiskManager {
   constructor(config) {
     this.config = config;
@@ -5,30 +10,38 @@ export class SessionRiskManager {
   }
 
   resetDay() {
-    this.haltedStrategies = new Set(); // "A" | "B"
-    this.lossesToday = { A: 0, B: 0 };
-    this.winsToday = { A: 0, B: 0 };
-    this.orbTradedDirections = new Set();
+    this.haltedStrategies = new Set(); // "B" | "OF"
+    // Lazily-initialized rather than pre-seeded {A:0, B:0} — a hardcoded shape
+    // silently produced NaN counters (and a loss-halt that could never trip)
+    // for any strategy identifier other than exactly "A"/"B".
+    this.lossesToday = {};
+    this.winsToday = {};
     this.strategyBTradesToday = 0;
     this.levelCooldowns = new Map();
+    this.orderFlowTradesToday = 0; // Order Flow Bot's own trade count, kept separate from Strategy B's
+    this.zoneCooldowns = new Map(); // Order Flow Bot's own per-zone cooldown, kept separate from levelCooldowns
   }
 
   get dayState() {
     return {
-      orbTradedDirections: this.orbTradedDirections,
       strategyBTradesToday: this.strategyBTradesToday,
       levelCooldowns: this.levelCooldowns,
+      orderFlowTradesToday: this.orderFlowTradesToday,
+      zoneCooldowns: this.zoneCooldowns,
     };
   }
 
   // One winning trade locks in and halts that strategy for the rest of the
   // day; a strategy's own losses also halt it independently once they reach
-  // maxLossesPerStrategyPerDay. A and B are tracked separately — a win/halt
-  // on one has no effect on the other. Anything other than "A"/"B" (e.g. the
-  // "reconciled" placeholder strategy used for positions this process didn't
-  // itself open) has no day-state identity to halt, so it's a no-op.
+  // maxLossesPerStrategyPerDay. B and OF are tracked separately — a win/halt
+  // on one has no effect on the other. Anything not in TRACKED_STRATEGIES
+  // (e.g. the "reconciled" placeholder strategy used for positions this
+  // process didn't itself open) has no day-state identity to halt, so it's a
+  // no-op.
   recordTradeResult(strategy, pnl) {
-    if (strategy !== "A" && strategy !== "B") return;
+    if (!TRACKED_STRATEGIES.has(strategy)) return;
+    this.lossesToday[strategy] ??= 0;
+    this.winsToday[strategy] ??= 0;
     if (pnl > 0) {
       this.winsToday[strategy] += 1;
       this.haltedStrategies.add(strategy);
@@ -40,13 +53,14 @@ export class SessionRiskManager {
     }
   }
 
-  recordOrbTrade(direction) {
-    this.orbTradedDirections.add(direction);
-  }
-
   recordStrategyBTrade(levelKey, nowMs) {
     this.strategyBTradesToday += 1;
     this.levelCooldowns.set(levelKey, nowMs);
+  }
+
+  recordOrderFlowTrade(zoneKey, nowMs) {
+    this.orderFlowTradesToday += 1;
+    this.zoneCooldowns.set(zoneKey, nowMs);
   }
 
   canTrade(strategy) {

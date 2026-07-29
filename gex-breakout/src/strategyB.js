@@ -79,7 +79,7 @@ export function evaluateStrategyB(ctx) {
       structureLow: level.rangeLow ?? null,
       entryPrice,
       direction,
-      stopCapPts: config.strategyA.stopCapPts,
+      stopCapPts: config.tradeManagement.stopCapPts,
     });
     if (!stop.valid) {
       return { strategy: "B", direction, level, levelKey, veto: "stop_exceeds_cap" };
@@ -89,8 +89,8 @@ export function evaluateStrategyB(ctx) {
       direction,
       entryPrice,
       levels,
-      maxDistancePts: config.strategyA.targetMaxDistancePts,
-      fixedTargetR: config.strategyA.fixedTargetR,
+      maxDistancePts: config.tradeManagement.targetMaxDistancePts,
+      fixedTargetR: config.tradeManagement.fixedTargetR,
       stopDistance: stop.distance,
     });
     const targetDistance = Math.abs(target.targetPrice - entryPrice);

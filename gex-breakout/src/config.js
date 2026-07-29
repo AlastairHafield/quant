@@ -14,7 +14,6 @@ export const CONFIG = {
   sessionEndET: { h: 16, m: 0 },
   logFlushET: { h: 16, m: 5 }, // dump the day's structured log to Discord once, shortly after close
 
-  orbWindowMin: 15,
   maxLossesPerStrategyPerDay: 2, // plus: a single winning trade also halts that strategy for the day (see riskSession.js)
 
   gexRecalcMin: 15,
@@ -67,31 +66,66 @@ export const CONFIG = {
     },
   },
 
-  strategyA: {
-    triggerBufferPts: 1,
-    entryMode: "trigger_close", // "trigger_close" | "pullback"
+  // Shared trade-management defaults — read by Strategy B (strategyB.js) AND the
+  // Order Flow Bot (orderFlowBot.js). breakevenAtR/takePartialFraction are applied
+  // unconditionally to EVERY open trade regardless of which strategy opened it
+  // (worker.js's evaluateOpenTrades/actOnExitResult), not just one strategy's —
+  // this used to live under the (removed) strategyA config block despite that.
+  tradeManagement: {
     stopCapPts: 12,
     targetMaxDistancePts: 30,
     fixedTargetR: 2,
     breakevenAtR: 1,
-    runner: {
-      enabled: true,
-      offFractionAtTarget: 0.5,
-      trailBars: 2,
+    takePartialFraction: 0.5,
+  },
+
+  orderFlowBot: {
+    triggerBufferPts: 1,
+    // Macro/geopolitical bias is deliberately a manual on/off toggle, not coded
+    // prediction logic (per the 2026-07-29 design discussion — monetary policy/
+    // GDP/inflation/labor-market cycle phases move too slowly to be a useful
+    // intraday signal, and geopolitical risk is inherently qualitative). Defaults
+    // true so a missing env var can't silently halt trading; flip to "false" by
+    // hand around known event risk (FOMC, CPI, major geopolitical headlines).
+    macroOverrideEnabled: process.env.ORDER_FLOW_MACRO_ON !== "false",
+    maxTradesPerDay: 3,
+    cooldownMinPerZone: 60,
+    volumeProfile: {
+      bucketSizePts: 1,
+      valueAreaPct: 0.7,
+      minSessionBars: 30,
+      compositeDays: 5,
     },
-    // Independent of the top-level executionEnabled/account switch — Strategy A
-    // (the 15-min ORB variant) stays signal-only even once the account points at
-    // the real Combine and Strategy B is live there, until A gets its own
-    // separate go-live decision (2026-07-27: moved Strategy B, the general
-    // level-breakout, to the real Combine; A explicitly held back).
-    executionEnabled: process.env.STRATEGY_A_EXECUTION_ENABLED === "true",
-    // Strategy A trades its OWN account (the practice account), separate from
-    // everything else's TOPSTEPX_ACCOUNT_NAME (the real Combine) — worker.js
-    // routes orders/position-polling/closes per-strategy using this. Required
-    // once STRATEGY_A_EXECUTION_ENABLED is true and more than one tradable
-    // account exists — resolveAccountId refuses to guess rather than risk
-    // placing a real practice-vs-Combine order on the wrong one.
-    accountNameHint: process.env.STRATEGY_A_ACCOUNT_NAME || null,
+    footprint: {
+      bucketSizePts: 1,
+      imbalanceRatio: 3,
+      minStackedLevels: 3,
+      bigTradeSizeThreshold: 50,
+    },
+    depth: {
+      sizeThreshold: 100, // resting-size floor to flag a candidate large order — tune live, no backtest possible
+      heatmapDecay: 0.98,
+      // Starts OFF: Level 2-derived signals are logged/observed, not load-bearing,
+      // until separately proven live — isolates "is the core bot sound" from "does
+      // the L2 addition actually help" as two separate go-live decisions.
+      gateEntries: false,
+    },
+    exit: {
+      trendTrailBufferPts: 2,
+      // Only used if TopstepX's bracket API turns out to reject a null/omitted
+      // take-profit for the trend-day "no fixed TP" design — verify live before
+      // relying on this rather than assuming it's needed.
+      placeholderTargetDistancePts: 500,
+    },
+    // Independent of the top-level executionEnabled/account switch — mirrors the
+    // exact precedent the old Strategy A had: stays signal-only even once the
+    // bot-wide flag and Strategy B are live, until the Order Flow Bot gets its own
+    // separate go-live decision (see the plan's Phase 6 checklist).
+    executionEnabled: process.env.STRATEGY_OF_EXECUTION_ENABLED === "true",
+    // Trades its OWN account (the practice account) — same account-role ("A")
+    // Strategy A used, just a new strategy tag ("OF"). See worker.js's
+    // accountRoleFor/resolveAccountIdForRole.
+    accountNameHint: process.env.STRATEGY_OF_ACCOUNT_NAME || null,
   },
 
   strategyB: {

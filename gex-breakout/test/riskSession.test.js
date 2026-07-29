@@ -10,9 +10,9 @@ import { CONFIG } from "../src/config.js";
 
 test("SessionRiskManager: a single winning trade halts that strategy for the day", () => {
   const mgr = new SessionRiskManager({ maxLossesPerStrategyPerDay: 2 });
-  assert.equal(mgr.canTrade("A"), true);
-  mgr.recordTradeResult("A", 50);
-  assert.equal(mgr.canTrade("A"), false);
+  assert.equal(mgr.canTrade("OF"), true);
+  mgr.recordTradeResult("OF", 50);
+  assert.equal(mgr.canTrade("OF"), false);
   assert.equal(mgr.canTrade("B"), true); // unaffected — halts are per strategy
 });
 
@@ -24,14 +24,14 @@ test("SessionRiskManager: halts a strategy after maxLossesPerStrategyPerDay lose
   assert.equal(mgr.canTrade("B"), false);
 });
 
-test("SessionRiskManager: strategies A and B are tracked fully independently", () => {
+test("SessionRiskManager: strategies OF and B are tracked fully independently", () => {
   const mgr = new SessionRiskManager({ maxLossesPerStrategyPerDay: 2 });
-  mgr.recordTradeResult("A", -100);
-  mgr.recordTradeResult("A", -50); // A halted (2 losses)
+  mgr.recordTradeResult("OF", -100);
+  mgr.recordTradeResult("OF", -50); // OF halted (2 losses)
   mgr.recordTradeResult("B", 25); // B halted (1 win)
-  assert.equal(mgr.canTrade("A"), false);
+  assert.equal(mgr.canTrade("OF"), false);
   assert.equal(mgr.canTrade("B"), false);
-  assert.equal(mgr.lossesToday.A, 2);
+  assert.equal(mgr.lossesToday.OF, 2);
   assert.equal(mgr.winsToday.B, 1);
 });
 
@@ -41,24 +41,26 @@ test("SessionRiskManager: an unrecognized strategy (e.g. 'reconciled') is a no-o
   assert.equal(mgr.haltedStrategies.size, 0);
 });
 
-test("SessionRiskManager: tracks ORB directions traded and Strategy B trades/cooldowns", () => {
+test("SessionRiskManager: tracks Order Flow Bot zone cooldowns and Strategy B trades/cooldowns", () => {
   const mgr = new SessionRiskManager({ maxLossesPerStrategyPerDay: 2 });
-  mgr.recordOrbTrade("long");
+  mgr.recordOrderFlowTrade("VA_HIGH:5530.00", 1000);
   mgr.recordStrategyBTrade("PRIOR_DAY_HIGH:5530.00", 1000);
-  assert.equal(mgr.dayState.orbTradedDirections.has("long"), true);
+  assert.equal(mgr.dayState.orderFlowTradesToday, 1);
+  assert.equal(mgr.dayState.zoneCooldowns.get("VA_HIGH:5530.00"), 1000);
   assert.equal(mgr.dayState.strategyBTradesToday, 1);
   assert.equal(mgr.dayState.levelCooldowns.get("PRIOR_DAY_HIGH:5530.00"), 1000);
 });
 
 test("SessionRiskManager: resetDay clears all day-scoped state", () => {
   const mgr = new SessionRiskManager({ maxLossesPerStrategyPerDay: 2 });
-  mgr.recordTradeResult("A", -100);
-  mgr.recordTradeResult("A", -50);
-  mgr.recordOrbTrade("long");
+  mgr.recordTradeResult("OF", -100);
+  mgr.recordTradeResult("OF", -50);
+  mgr.recordOrderFlowTrade("VA_HIGH:5530.00", 1000);
   mgr.recordStrategyBTrade("X:1.00", 500);
   mgr.resetDay();
-  assert.equal(mgr.canTrade("A"), true);
-  assert.equal(mgr.dayState.orbTradedDirections.size, 0);
+  assert.equal(mgr.canTrade("OF"), true);
+  assert.equal(mgr.dayState.orderFlowTradesToday, 0);
+  assert.equal(mgr.dayState.zoneCooldowns.size, 0);
   assert.equal(mgr.dayState.strategyBTradesToday, 0);
   assert.equal(mgr.dayState.levelCooldowns.size, 0);
 });

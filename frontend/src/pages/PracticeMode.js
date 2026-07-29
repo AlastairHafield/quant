@@ -6,11 +6,11 @@ const fmtUsd = (n) => typeof n === 'number' ? (n >= 0 ? '+$' : '-$') + Math.abs(
 const fmtTime = (iso) => iso ? new Date(iso).toLocaleString('en-US', { hour12: false }) : '—';
 const ageSec = (iso) => iso ? Math.round((Date.now() - new Date(iso).getTime()) / 1000) : null;
 
-// GEX Breakout's Strategy A (the 15-min ORB variant) is currently the only
-// strategy running on a practice account — everything else (Strategy B,
-// Mechanical ORB, Gap Continuation) trades the real Combine. This page pulls
-// GEX Breakout's status payload and shows only the strategyA slice, plus
-// Strategy A's own trades (accountRole "A") from the trade journal.
+// GEX Breakout's Order Flow Bot is currently the only strategy running on a
+// practice account — everything else (Strategy B, Mechanical ORB, Gap
+// Continuation) trades the real Combine. This page pulls GEX Breakout's
+// status payload and shows only the orderFlowBot slice, plus the Order Flow
+// Bot's own trades (accountRole "A") from the trade journal.
 export default function PracticeMode() {
   const [status, setStatus] = useState(null);
   const [trades, setTrades] = useState(null);
@@ -71,9 +71,9 @@ export default function PracticeMode() {
     );
   }
 
-  const a = status.strategyA;
+  const a = status.orderFlowBot;
   const stale = ageSec(status.updatedAt) > 15;
-  const aLog = (status.recentLog || []).filter((row) => row.strategy === 'A');
+  const aLog = (status.recentLog || []).filter((row) => row.strategy === 'OF');
 
   const closed = (trades || []).filter((t) => t.status === 'closed' && t.realizedPnl != null);
   const wins = closed.filter((t) => t.realizedPnl > 0).length;
@@ -83,7 +83,7 @@ export default function PracticeMode() {
   return (
     <div>
       <p className="page-title">
-        Practice Mode — GEX Breakout Strategy A (15-min ORB)
+        Practice Mode — GEX Breakout Order Flow Bot
         {a.signalOnly && <span style={{ marginLeft: 10, color: 'var(--yellow)' }}>SIGNAL-ONLY MODE</span>}
         {stale && <span style={{ marginLeft: 10, color: 'var(--red)' }}>⚠ stale ({ageSec(status.updatedAt)}s)</span>}
       </p>
@@ -98,12 +98,6 @@ export default function PracticeMode() {
           <div className="metric-value" style={{ fontSize: 16 }}>{status.regime ?? '—'}</div>
         </div>
         <div className="metric">
-          <div className="metric-label">ORB H/L</div>
-          <div className="metric-value" style={{ fontSize: 16 }}>
-            {status.orb.locked ? `${r(status.orb.high)} / ${r(status.orb.low)}` : 'forming...'}
-          </div>
-        </div>
-        <div className="metric">
           <div className="metric-label">Practice Balance</div>
           <div className="metric-value" style={{ fontSize: 16 }}>
             {a.account ? '$' + a.account.balance.toLocaleString() : '—'}
@@ -112,7 +106,7 @@ export default function PracticeMode() {
         <div className="metric">
           <div className="metric-label">Wins / Losses (halt state)</div>
           <div className="metric-value" style={{ fontSize: 16 }}>
-            {status.dayState.winsToday?.A ?? 0}W / {status.dayState.lossesToday?.A ?? 0}L
+            {status.dayState.winsToday?.OF ?? 0}W / {status.dayState.lossesToday?.OF ?? 0}L
           </div>
         </div>
         <div className="metric">
@@ -155,7 +149,7 @@ export default function PracticeMode() {
       </div>
 
       <div className="card">
-        <p className="card-title">Recent Signals / Vetoes — Strategy A ({aLog.length})</p>
+        <p className="card-title">Recent Signals / Vetoes — Order Flow Bot ({aLog.length})</p>
         {aLog.length === 0 ? (
           <div className="empty">No signal evaluations yet.</div>
         ) : (

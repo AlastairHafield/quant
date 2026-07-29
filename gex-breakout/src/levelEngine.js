@@ -1,10 +1,3 @@
-export function buildOrbLevels(orbHigh, orbLow) {
-  return [
-    { type: "ORB_HIGH", price: orbHigh, role: "strategyA_trigger" },
-    { type: "ORB_LOW", price: orbLow, role: "strategyA_trigger" },
-  ];
-}
-
 export function buildGexLevels(gexSnapshot) {
   const levels = [];
   if (gexSnapshot.flipPoint != null) {

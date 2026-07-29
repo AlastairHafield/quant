@@ -4,22 +4,22 @@ import React from 'react';
 // live from each bot (only GEX Breakout pushes a status payload the frontend
 // can read; Mechanical ORB and Gap Continuation don't currently expose their
 // config over the wire). Update this whenever a bot's config.js changes.
-const AS_OF = '2026-07-28';
+const AS_OF = '2026-07-29';
 
 const STRATEGIES = [
   {
-    id: 'gex-a',
+    id: 'gex-of',
     system: 'GEX Breakout',
-    strategy: 'Strategy A — 15-min ORB',
+    strategy: 'Order Flow Bot (replaces the old Strategy A / 15-min ORB)',
     account: 'Practice (own account, separate from Strategy B)',
     instrument: 'MES',
-    timeframe: '15-min opening range (09:30–09:45 ET)',
+    timeframe: 'Regime-adaptive — GEX bias picks trend-following vs. mean-reversion each day, no fixed window',
     entryWindow: 'No new entries after 12:00 ET · force-flat 15:55 ET',
-    entry: 'Close beyond the OR high/low (+1pt trigger buffer), order-flow grade required',
-    stopTarget: 'Stop capped at 12pts · target capped at 30pts (2R fixed) · breakeven at 1R · 50% runner trails 2 bars past target',
+    entry: 'In development (Phase 1 of the rebuild): volume profile, footprint, and Level 2 depth zones/triggers are not wired in yet — the strategy slot currently emits no signals',
+    stopTarget: 'Trend days: trail behind zones/delta levels, no fixed target · Mean-reversion days: fixed target at the contrarian zone — not yet implemented',
     sizing: 'Base 4 contracts × wall-proximity multiplier — flat (ladder not applied on practice account)',
-    riskLimits: 'Max 2 losses/day or 1 win halts the strategy for the day',
-    execEnvVar: 'STRATEGY_A_EXECUTION_ENABLED',
+    riskLimits: 'Max 3 trades/day, 60-min cooldown per zone, max 2 losses/day or 1 win halts the strategy for the day',
+    execEnvVar: 'STRATEGY_OF_EXECUTION_ENABLED',
   },
   {
     id: 'gex-b',
@@ -72,7 +72,7 @@ export default function StrategyConfig() {
       <div className="status" style={{ marginBottom: 16 }}>
         Reference snapshot as of {AS_OF} — this is a manually-maintained mirror of each bot's config.js, not pulled
         live. Live execution status/account balance/positions are on each bot's own dashboard tab (and Practice
-        Mode for Strategy A).
+        Mode for the Order Flow Bot).
       </div>
 
       {STRATEGIES.map((s) => (

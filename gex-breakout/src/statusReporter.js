@@ -20,10 +20,9 @@ export function buildStatusPayload(worker) {
     wallsEs: worker.levelState.wallsEs,
     basis: worker.basis,
     basisAsOf: worker.basisAsOf ? worker.basisAsOf.toISOString() : null,
-    orb: { high: worker.orbHigh, low: worker.orbLow, locked: worker.orbLocked },
     dayState: {
-      orbTradedDirections: [...worker.riskManager.dayState.orbTradedDirections],
       strategyBTradesToday: worker.riskManager.dayState.strategyBTradesToday,
+      orderFlowTradesToday: worker.riskManager.dayState.orderFlowTradesToday,
       haltedStrategies: [...worker.riskManager.haltedStrategies],
       winsToday: worker.riskManager.winsToday,
       lossesToday: worker.riskManager.lossesToday,
@@ -33,11 +32,11 @@ export function buildStatusPayload(worker) {
       : null,
     openPositions: worker.openPositions,
     accountAsOf: worker.accountAsOf ? worker.accountAsOf.toISOString() : null,
-    // Strategy A's own (practice) account — separate from everything above,
-    // which is the "default" role (real Combine). See worker.js's
+    // The Order Flow Bot's own (practice) account — separate from everything
+    // above, which is the "default" role (real Combine). See worker.js's
     // accountRoleFor/isLiveExecutionAllowed for how the two stay isolated.
-    strategyA: {
-      signalOnly: !(CONFIG.executionEnabled && CONFIG.strategyA.executionEnabled),
+    orderFlowBot: {
+      signalOnly: !(CONFIG.executionEnabled && CONFIG.orderFlowBot.executionEnabled),
       account: worker.accountA
         ? { id: worker.accountA.id, name: worker.accountA.name, balance: worker.accountA.balance }
         : null,

@@ -1,7 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import {
-  buildOrbLevels,
   buildGexLevels,
   buildDailyLevels,
   detectConsolidation,
@@ -9,14 +8,6 @@ import {
   directionalWallFilter,
   isInOpenSpace,
 } from "../src/levelEngine.js";
-
-test("buildOrbLevels returns high/low tagged for Strategy A", () => {
-  const levels = buildOrbLevels(5525, 5500);
-  assert.deepEqual(levels, [
-    { type: "ORB_HIGH", price: 5525, role: "strategyA_trigger" },
-    { type: "ORB_LOW", price: 5500, role: "strategyA_trigger" },
-  ]);
-});
 
 test("buildGexLevels emits the flip point and all wall levels", () => {
   const gexSnapshot = {

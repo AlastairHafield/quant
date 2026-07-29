@@ -4,7 +4,6 @@ import { computeGexSnapshotFromProfile } from "./gexEngine.js";
 import { computeBasis, toEsLevels } from "./basis.js";
 import { classifyRegime } from "./regime.js";
 import {
-  buildOrbLevels,
   buildGexLevels,
   buildDailyLevels,
   detectConsolidation,
@@ -12,7 +11,6 @@ import {
   isInOpenSpace,
 } from "./levelEngine.js";
 import { evaluateBreakoutFlow, buildAbsorptionWindow } from "./orderFlow.js";
-import { checkOrbTrigger, evaluateStrategyA } from "./strategyA.js";
 import {
   checkBreakoutTrigger,
   checkProximity,
@@ -57,33 +55,24 @@ export function minutesOf(t) {
   return t.getHours() * 60 + t.getMinutes();
 }
 
-// Strategy A (the 15-min ORB variant) has its own independent go-live gate on
-// top of the bot-wide executionEnabled/account switch — see config.js's
-// strategyA.executionEnabled comment. Every other strategy just follows the
-// bot-wide flag, same as before this existed.
+// The Order Flow Bot ("OF") has its own independent go-live gate on top of
+// the bot-wide executionEnabled/account switch — see config.js's
+// orderFlowBot.executionEnabled comment. Every other strategy just follows
+// the bot-wide flag, same precedent Strategy A (the strategy OF replaced) had.
 export function isLiveExecutionAllowed(strategy, config) {
   if (!config.executionEnabled) return false;
-  if (strategy === "A") return config.strategyA.executionEnabled;
+  if (strategy === "OF") return config.orderFlowBot.executionEnabled;
   return true;
 }
 
-// Strategy A trades its own account (the practice account) — everything else
-// ("default") trades whatever TOPSTEPX_ACCOUNT_NAME points at (the real
-// Combine). Only two roles exist today; this is the one place that decision
-// is made, so every account-facing method below routes off it consistently
-// instead of re-deriving "is this Strategy A" locally.
+// The Order Flow Bot trades its own account (the practice account, same role
+// Strategy A used before it) — everything else ("default") trades whatever
+// TOPSTEPX_ACCOUNT_NAME points at (the real Combine). Only two roles exist
+// today; this is the one place that decision is made, so every
+// account-facing method below routes off it consistently instead of
+// re-deriving "is this the practice strategy" locally.
 export function accountRoleFor(strategy) {
-  return strategy === "A" ? "A" : "default";
-}
-
-export function orbWindowBounds(config) {
-  const start = config.sessionOpenET.h * 60 + config.sessionOpenET.m;
-  return { startMin: start, endMin: start + config.orbWindowMin };
-}
-
-export function isWithinOrbWindow(t, bounds) {
-  const m = minutesOf(t);
-  return m >= bounds.startMin && m < bounds.endMin;
+  return strategy === "OF" ? "A" : "default";
 }
 
 export function shouldFlattenNow(t, config) {
@@ -123,13 +112,6 @@ export function shouldFlushLogNow(t, logFlushET) {
   return isFlushTime ? dayKey : null;
 }
 
-export function updateOrbRange(current, bar) {
-  return {
-    orbHigh: current.orbHigh == null ? bar.high : Math.max(current.orbHigh, bar.high),
-    orbLow: current.orbLow == null ? bar.low : Math.min(current.orbLow, bar.low),
-  };
-}
-
 // ProjectX Gateway position type: 1 = Long, 2 = Short — confirmed live
 // 2026-07-24 by cross-checking a position's type against the direction of
 // the signal that opened it.
@@ -156,42 +138,21 @@ export function tradesRequiringCloseOnFlip(trackedTrades, contractId, newDirecti
   return flipping ? contractTrades : [];
 }
 
-// Reduces already-fetched historical bars (real UTC timestamps) down to the
-// high/low of whatever ET calendar day + window they actually fall in — the
-// pure half of backfillOrbIfPastWindow, split out so it's testable without a
-// live TopstepX call. Takes the ET-conversion function as a parameter so
-// tests can inject a deterministic stand-in instead of the real timezone
-// round-trip. Returns null if no bars fall in the window (e.g. the contract
-// is too new, or it's a holiday) — the caller just leaves the ORB unlocked
-// and tries again on the next bar.
-export function computeOrbFromHistoricalBars(bars, dayKey, bounds, toETFn = toET) {
-  const windowBars = bars.filter((b) => {
-    const bt = toETFn(new Date(b.timestamp));
-    return bt.toDateString() === dayKey && minutesOf(bt) >= bounds.startMin && minutesOf(bt) < bounds.endMin;
-  });
-  if (!windowBars.length) return null;
-  return {
-    high: Math.max(...windowBars.map((b) => b.high)),
-    low: Math.min(...windowBars.map((b) => b.low)),
-  };
-}
-
 export function shiftWalls(walls, basis) {
   const shift = (arr) => arr.map((w) => ({ ...w, strike: w.strike + basis }));
   return { aboveSpot: shift(walls.aboveSpot), belowSpot: shift(walls.belowSpot) };
 }
 
-export function buildLevelState({ gexSnapshot, basis, orbHigh, orbLow, orbLocked, dailyLevels, consolRange }) {
+export function buildLevelState({ gexSnapshot, basis, dailyLevels, consolRange }) {
   if (!gexSnapshot || basis == null) {
     return { levels: [], triggerLevelsB: [], flipPointEs: null, wallsEs: { aboveSpot: [], belowSpot: [] } };
   }
   const gexLevelsEs = toEsLevels(buildGexLevels(gexSnapshot), basis);
   const flipPointEs = gexLevelsEs.find((l) => l.type === "FLIP")?.price ?? null;
   const wallsEs = shiftWalls(gexSnapshot.walls, basis);
-  const orbLevelsEs = orbLocked ? buildOrbLevels(orbHigh, orbLow) : [];
   const consolLevelsEs = consolidationLevels(consolRange);
 
-  const levels = [...gexLevelsEs, ...orbLevelsEs, ...dailyLevels, ...consolLevelsEs];
+  const levels = [...gexLevelsEs, ...dailyLevels, ...consolLevelsEs];
   const triggerLevelsB = [
     ...gexLevelsEs.filter((l) => l.type === "FLIP" || l.type === "GEX_WALL"),
     ...dailyLevels,
@@ -210,10 +171,6 @@ export class Worker {
     this.logger = new SignalLogger();
     this.bars = [];
     this.currentDay = null;
-    this.orbHigh = null;
-    this.orbLow = null;
-    this.orbLocked = false;
-    this.orbBackfillInFlight = false;
     this.gexSnapshot = null;
     this.basis = null;
     this.basisAsOf = null;
@@ -229,12 +186,11 @@ export class Worker {
       flipPointEs: null,
       wallsEs: { aboveSpot: [], belowSpot: [] },
     };
-    this.pendingA = null;
     this.pendingB = null;
     this.lastRegimeInfo = null;
-    this.account = null; // "default" role — everything except Strategy A
+    this.account = null; // "default" role — everything except the Order Flow Bot
     this.openPositions = [];
-    this.accountA = null; // Strategy A's own (practice) account
+    this.accountA = null; // the Order Flow Bot's own (practice) account — role "A"
     this.openPositionsA = [];
     this.accountAsOf = null;
     this.trackedTrades = []; // locally-tracked open trades, for MFE/MAE + closure detection
@@ -242,13 +198,13 @@ export class Worker {
   }
 
   async resolveAccountIdForRole(role) {
-    return topstepx.resolveAccountId(role === "A" ? CONFIG.strategyA.accountNameHint : undefined);
+    return topstepx.resolveAccountId(role === "A" ? CONFIG.orderFlowBot.accountNameHint : undefined);
   }
 
   // Polls both accounts independently — a failure resolving/fetching one
-  // (e.g. STRATEGY_A_ACCOUNT_NAME misconfigured) must never block the other,
+  // (e.g. STRATEGY_OF_ACCOUNT_NAME misconfigured) must never block the other,
   // since Strategy B's real-account trading has to keep working regardless of
-  // Strategy A's practice-account health.
+  // the Order Flow Bot's practice-account health.
   async pollAccount() {
     await Promise.all([this.pollAccountForRole("default"), this.pollAccountForRole("A")]);
     this.accountAsOf = new Date();
@@ -289,9 +245,9 @@ export class Worker {
   // Scoped to trackedTrades from the SAME role before checking for untracked
   // positions — both accounts trade the same MES contract, so matching by
   // contractId alone across the whole (unscoped) trackedTrades list could
-  // treat Strategy A's practice position as "already tracked" because of an
-  // unrelated Strategy B trade on the real account sharing that contractId,
-  // or vice versa.
+  // treat the Order Flow Bot's practice position as "already tracked" because
+  // of an unrelated Strategy B trade on the real account sharing that
+  // contractId, or vice versa.
   async reconcileUntrackedPositionsForRole(role, openPositions) {
     const roleTrackedTrades = this.trackedTrades.filter((t) => t.accountRole === role);
     for (const pos of untrackedPositions(openPositions, roleTrackedTrades)) {
@@ -391,7 +347,7 @@ export class Worker {
   async classifyPassiveClose(trade, client = topstepx) {
     try {
       const role = trade.accountRole ?? "default";
-      const accountId = await client.resolveAccountId(role === "A" ? CONFIG.strategyA.accountNameHint : undefined);
+      const accountId = await client.resolveAccountId(role === "A" ? CONFIG.orderFlowBot.accountNameHint : undefined);
       const openOrders = await client.searchOpenOrders(accountId);
       const orphaned = openOrders.filter((o) => o.contractId === trade.contractId);
       if (orphaned.length === 0) return "closed"; // real bracket fill, nothing left to explain
@@ -492,9 +448,6 @@ export class Worker {
     this.levelState = buildLevelState({
       gexSnapshot: this.gexSnapshot,
       basis: this.basis,
-      orbHigh: this.orbHigh,
-      orbLow: this.orbLow,
-      orbLocked: this.orbLocked,
       dailyLevels,
       consolRange,
     });
@@ -523,45 +476,17 @@ export class Worker {
     this.rebuildLevels();
   }
 
-  // Only ever populated by live streamed bars during the window (see onBar) —
-  // a worker that starts or restarts after today's window has already closed
-  // has no memory of it and would otherwise never lock an ORB for the rest of
-  // the day. That matters beyond Strategy A: onBar gates Strategy B behind
-  // orbLocked too even though B doesn't itself need the ORB. No-ops (and
-  // stays retriable) until the window has actually ended; self-resolves once
-  // it does, without needing a permanent "already tried" flag.
-  async backfillOrbIfPastWindow(t) {
-    const bounds = orbWindowBounds(CONFIG);
-    if (minutesOf(t) < bounds.endMin) return;
-    const bars = await topstepx.fetchRecentBars(CONFIG.instrumentData, 720);
-    const range = computeOrbFromHistoricalBars(bars, t.toDateString(), bounds);
-    if (!range) return;
-    this.orbHigh = range.high;
-    this.orbLow = range.low;
-    this.orbLocked = true;
-    this.rebuildLevels();
-  }
-
-  // Nothing previously reset orbHigh/orbLow/orbLocked/pendingA/pendingB/
-  // riskManager's day-state (win/loss halts, ORB-traded directions, level
-  // cooldowns) at a new day — once locked, orbLocked stayed true forever, so
-  // a worker that started late one day (backfilling that day's already-
-  // completed ORB) would carry orbLocked=true straight through the night,
-  // letting evaluateSignals run on pre-market bars the next calendar day
-  // using yesterday's stale ORB range (confirmed live 2026-07-28: two real
-  // Strategy B trades fired around 04:06/04:38 UTC, hours before the real
-  // 9:30 ET session open, on an account that hadn't restarted since before
-  // midnight). SessionRiskManager.resetDay() already existed for exactly
+  // Nothing previously reset pendingB/riskManager's day-state (win/loss
+  // halts, level cooldowns) at a new day — a real live incident (2026-07-28:
+  // two real Strategy B trades fired hours before the real 9:30 ET session
+  // open, on an account that hadn't restarted since before midnight, because
+  // the now-removed ORB-lock state stayed stuck true overnight) is why this
+  // exists at all. SessionRiskManager.resetDay() already existed for exactly
   // this but was never actually called anywhere after construction.
   checkDayRollover(t) {
     const dayKey = t.toDateString();
     if (this.currentDay === dayKey) return;
     this.currentDay = dayKey;
-    this.orbHigh = null;
-    this.orbLow = null;
-    this.orbLocked = false;
-    this.orbBackfillInFlight = false;
-    this.pendingA = null;
     this.pendingB = null;
     this.riskManager.resetDay();
   }
@@ -586,24 +511,6 @@ export class Worker {
     // no-op in signal-only mode without needing its own separate gate.
     this.evaluateOpenTrades(bar);
 
-    if (isWithinOrbWindow(t, orbWindowBounds(CONFIG))) {
-      Object.assign(this, updateOrbRange(this, bar));
-      return;
-    }
-    if (!this.orbLocked && this.orbHigh != null) {
-      this.orbLocked = true;
-      this.rebuildLevels();
-    }
-    if (!this.orbLocked && !this.orbBackfillInFlight) {
-      this.orbBackfillInFlight = true;
-      this.backfillOrbIfPastWindow(t)
-        .catch((e) => console.error("ORB backfill failed:", e.message))
-        .finally(() => {
-          this.orbBackfillInFlight = false;
-        });
-    }
-    if (!this.orbLocked) return;
-
     // Matches mechanical-orb's window: no new entries past entryCutoffET, and
     // any position still open past flattenAtET gets force-closed rather than
     // left to ride its bracket to stop/target/session end.
@@ -615,13 +522,14 @@ export class Worker {
     this.evaluateSignals(bar, t);
   }
 
-  // Closes every open trade at once (Strategy A and B can legitimately be
-  // open concurrently) — dedupes by (accountRole, contractId) since a shared
-  // contract only ever has one real net position PER ACCOUNT at the broker
-  // (see closeOnDirectionFlip); calling closePositionAndCancelOrders twice
-  // for the same already-closed account+contract would just be a
-  // wasted/erroring call. Strategy A (practice) and everything else (real
-  // Combine) are different accounts now, so contractId alone isn't unique.
+  // Closes every open trade at once (the Order Flow Bot and Strategy B can
+  // legitimately be open concurrently) — dedupes by (accountRole, contractId)
+  // since a shared contract only ever has one real net position PER ACCOUNT
+  // at the broker (see closeOnDirectionFlip); calling
+  // closePositionAndCancelOrders twice for the same already-closed
+  // account+contract would just be a wasted/erroring call. The Order Flow Bot
+  // (practice) and everything else (real Combine) are different accounts,
+  // so contractId alone isn't unique.
   async flattenAll() {
     const roles = [...new Set(this.trackedTrades.map((t) => t.accountRole ?? "default"))];
     for (const role of roles) {
@@ -679,70 +587,22 @@ export class Worker {
     const idx = this.bars.length - 1;
     const prevBar = this.bars[idx - 1] ?? bar;
 
-    this.tryStrategyA(bar, prevBar, idx, t, regimeInfo);
+    this.tryOrderFlow(bar, prevBar, idx, t, regimeInfo);
     this.tryStrategyB(bar, prevBar, idx, t, regimeInfo);
   }
 
-  // Flow grading needs the breakout bar PLUS one confirmation bar (spec §7). A live
-  // stream never has "the next bar" yet at the moment the breakout bar itself is
-  // processed, so triggering arms a pending breakout snapshotted at that bar; it's
-  // graded and evaluated one bar later, once the confirmation bar exists.
-  tryStrategyA(bar, prevBar, idx, t, regimeInfo) {
-    if (!this.riskManager.canTrade("A")) return;
-
-    if (this.pendingA && this.pendingA.breakoutIndex === idx - 1) {
-      const pending = this.pendingA;
-      this.pendingA = null;
-      const flow = evaluateBreakoutFlow(
-        this.bars,
-        pending.breakoutIndex,
-        pending.direction,
-        pending.breakoutLevel,
-        CONFIG.orderFlow
-      );
-      if (flow.grade !== "PENDING") {
-        const result = evaluateStrategyA({
-          price: pending.entryPrice,
-          prevPrice: pending.prevPrice,
-          orbHigh: this.orbHigh,
-          orbLow: this.orbLow,
-          regimeInfo: pending.regimeInfo,
-          flipPointEs: pending.flipPointEs,
-          walls: pending.walls,
-          flowGrade: flow.grade,
-          levels: pending.levels,
-          nowET: pending.nowET,
-          config: CONFIG,
-          dayState: this.riskManager.dayState,
-        });
-        if (result) {
-          this.handleSignal(result, pending.regimeInfo, flow);
-        }
-      }
-    }
-
-    if (!this.pendingA) {
-      const direction = checkOrbTrigger({
-        price: bar.close,
-        orbHigh: this.orbHigh,
-        orbLow: this.orbLow,
-        triggerBufferPts: CONFIG.strategyA.triggerBufferPts,
-      });
-      if (direction && !this.riskManager.dayState.orbTradedDirections.has(direction)) {
-        this.pendingA = {
-          direction,
-          breakoutLevel: direction === "long" ? this.orbHigh : this.orbLow,
-          breakoutIndex: idx,
-          entryPrice: bar.close,
-          prevPrice: prevBar.close,
-          regimeInfo,
-          flipPointEs: this.levelState.flipPointEs,
-          walls: this.levelState.wallsEs,
-          levels: this.levelState.levels,
-          nowET: t,
-        };
-      }
-    }
+  // Placeholder — the Order Flow Bot's real zone/trigger/signal logic lands
+  // in Phase 4 of the order-flow-bot plan (volumeProfile.js/footprint.js/
+  // depthBook.js/orderFlowBot.js). Unlike Strategy A/B, absorption/path-of-
+  // least-resistance/lack-of-participation are all retrospective (computed
+  // off the trailing bar window ending at the current bar), so this needs no
+  // pending-breakout-then-confirm-bar scaffold the way tryStrategyB still has
+  // — it can evaluate synchronously once real logic is wired in.
+  tryOrderFlow(bar, prevBar, idx, t, regimeInfo) {
+    if (!this.riskManager.canTrade("OF")) return;
+    // No signals yet — this is the safe placeholder that lets the worker
+    // boot and run cleanly with Strategy A/ORB removed, before the Order
+    // Flow Bot's own signal logic is built.
   }
 
   tryStrategyB(bar, prevBar, idx, t, regimeInfo) {
@@ -812,12 +672,13 @@ export class Worker {
   }
 
   handleSignal(result, regimeInfo, flow) {
-    // Strategy A (practice account) and everything else (real Combine, shared
-    // with Mechanical ORB and Gap Continuation) are on different accounts now
-    // — each checks only ITS OWN account's real position state (refreshed
-    // every poll), not just this bot's own local view, so this still catches
-    // a position opened by another bot on the real account, without Strategy
-    // A's practice-account activity ever blocking (or being blocked by) it.
+    // The Order Flow Bot (practice account) and everything else (real
+    // Combine, shared with Mechanical ORB and Gap Continuation) are on
+    // different accounts — each checks only ITS OWN account's real position
+    // state (refreshed every poll), not just this bot's own local view, so
+    // this still catches a position opened by another bot on the real
+    // account, without the Order Flow Bot's practice-account activity ever
+    // blocking (or being blocked by) it.
     const role = accountRoleFor(result.strategy);
     const relevantPositions = role === "A" ? this.openPositionsA : this.openPositions;
     const vetoReason = relevantPositions.length > 0 ? "position_already_open" : result.veto;
@@ -843,11 +704,11 @@ export class Worker {
 
     // Ladder only applies to Strategy B (the real Combine, whose actual
     // starting balance is known and calibrated — see config.js's
-    // sizing.ladder.startingEquity comment). Strategy A's practice account
-    // balance is arbitrary and not calibrated against this ladder, so it
-    // stays flat (ratio 1x, i.e. just its own base x wall multiplier) rather
-    // than risk the exact same class of oversizing bug against an unverified
-    // number.
+    // sizing.ladder.startingEquity comment). The Order Flow Bot's practice
+    // account balance is arbitrary and not calibrated against this ladder,
+    // so it stays flat (ratio 1x, i.e. just its own base x wall multiplier)
+    // rather than risk the exact same class of oversizing bug against an
+    // unverified number.
     let ratio = 1;
     if (role === "default") {
       const equity = this.account?.balance ?? CONFIG.risk.sizing.ladder.startingEquity;
@@ -860,7 +721,7 @@ export class Worker {
   }
 
   markTraded(result) {
-    if (result.strategy === "A") this.riskManager.recordOrbTrade(result.direction);
+    if (result.strategy === "OF") this.riskManager.recordOrderFlowTrade(result.zoneKey, Date.now());
     else if (result.strategy === "B") this.riskManager.recordStrategyBTrade(result.levelKey, Date.now());
   }
 
@@ -881,7 +742,7 @@ export class Worker {
         !trade.movedToBreakeven &&
         trade.stopPrice != null &&
         trade.originalStopPrice != null &&
-        trade.mfe >= Math.abs(trade.entryPrice - trade.originalStopPrice) * CONFIG.strategyA.breakevenAtR
+        trade.mfe >= Math.abs(trade.entryPrice - trade.originalStopPrice) * CONFIG.tradeManagement.breakevenAtR
       ) {
         trade.movedToBreakeven = true;
         trade.actionInFlight = true;
@@ -951,7 +812,7 @@ export class Worker {
     }
 
     if (result.action === "TAKE_PARTIAL") {
-      const fraction = CONFIG.strategyA.runner.offFractionAtTarget;
+      const fraction = CONFIG.tradeManagement.takePartialFraction;
       const reduceSize = Math.round(trade.size * fraction);
       const remainingSize = trade.size - reduceSize;
       if (reduceSize <= 0 || remainingSize <= 0) return; // nothing sensible to reduce
@@ -1059,20 +920,20 @@ export class Worker {
   }
 
   // Never hold opposite-direction exposure on the same contract at once —
-  // hedging isn't allowed on this account. Strategy A and B can legitimately
-  // both be long (or both short) at once, that's untouched; but a live SHORT
-  // immediately followed by an opposite LONG signal used to just fire a
-  // second bracket order on top of the first. The two market legs net flat
-  // at the broker, but each trade's own stop/target bracket doesn't cancel
-  // just because a *different* order zeroed the net position — both stayed
-  // resting, and one filled on its own a minute later, leaving a naked,
-  // untracked position with no stop or target (caught live 2026-07-24,
+  // hedging isn't allowed on this account. The Order Flow Bot and Strategy B
+  // can legitimately both be long (or both short) at once, that's untouched;
+  // but a live SHORT immediately followed by an opposite LONG signal used to
+  // just fire a second bracket order on top of the first. The two market legs
+  // net flat at the broker, but each trade's own stop/target bracket doesn't
+  // cancel just because a *different* order zeroed the net position — both
+  // stayed resting, and one filled on its own a minute later, leaving a
+  // naked, untracked position with no stop or target (caught live 2026-07-24,
   // manually flattened).
   // Scoped to trackedTrades from the SAME account role as the incoming
-  // signal — Strategy A (practice) and everything else (real Combine) are on
-  // different accounts entirely now, so a direction flip on one account must
-  // never touch a same-contract position that's actually sitting on the
-  // other account.
+  // signal — the Order Flow Bot (practice) and everything else (real
+  // Combine) are on different accounts entirely, so a direction flip on one
+  // account must never touch a same-contract position that's actually
+  // sitting on the other account.
   async closeOnDirectionFlip(accountId, contractId, newDirection, accountRole) {
     const roleTrackedTrades = this.trackedTrades.filter((t) => (t.accountRole ?? "default") === accountRole);
     const toClose = tradesRequiringCloseOnFlip(roleTrackedTrades, contractId, newDirection);
@@ -1084,7 +945,7 @@ export class Worker {
   }
 
   // entryPrice on a freshly-opened trade is the strategy's theoretical trigger-bar
-  // close (see strategyA/strategyB's `entryPrice = price`) — the entry itself is a
+  // close (see strategyB.js's `entryPrice = price`) — the entry itself is a
   // MARKET order, so TopstepX's Order/place response never confirms what it actually
   // filled at, only an orderId. In a fast-moving breakout this can diverge from the
   // real fill by more than a few ticks (confirmed live 2026-07-27: a real Strategy B

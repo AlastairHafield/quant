@@ -13,21 +13,20 @@ test("buildStatusPayload: sane defaults before any data has arrived", () => {
   assert.equal(payload.regime, null);
   assert.equal(payload.gex, null);
   assert.equal(payload.basis, null);
-  assert.deepEqual(payload.orb, { high: null, low: null, locked: false });
   assert.deepEqual(payload.dayState, {
-    orbTradedDirections: [],
     strategyBTradesToday: 0,
+    orderFlowTradesToday: 0,
     haltedStrategies: [],
-    winsToday: { A: 0, B: 0 },
-    lossesToday: { A: 0, B: 0 },
+    winsToday: {},
+    lossesToday: {},
   });
   assert.deepEqual(payload.recentLog, []);
   assert.equal(payload.account, null);
   assert.deepEqual(payload.openPositions, []);
   assert.equal(payload.accountAsOf, null);
-  assert.equal(payload.strategyA.signalOnly, true);
-  assert.equal(payload.strategyA.account, null);
-  assert.deepEqual(payload.strategyA.openPositions, []);
+  assert.equal(payload.orderFlowBot.signalOnly, true);
+  assert.equal(payload.orderFlowBot.account, null);
+  assert.deepEqual(payload.orderFlowBot.openPositions, []);
 });
 
 test("buildStatusPayload: reflects live account balance/positions once polled", () => {
@@ -42,7 +41,7 @@ test("buildStatusPayload: reflects live account balance/positions once polled", 
   assert.equal(payload.accountAsOf, "2026-07-24T14:00:00.000Z");
 });
 
-test("buildStatusPayload: strategyA reports its OWN (practice) account, independent of the default account above", () => {
+test("buildStatusPayload: orderFlowBot reports its OWN (practice) account, independent of the default account above", () => {
   const worker = createWorker();
   worker.account = { id: 1, name: "REAL", balance: 49586.83 };
   worker.openPositions = [{ id: 1, contractId: "CON.F.US.MES.U26", size: 2, averagePrice: 5500, type: 1 }];
@@ -50,10 +49,10 @@ test("buildStatusPayload: strategyA reports its OWN (practice) account, independ
   worker.openPositionsA = [{ id: 2, contractId: "CON.F.US.MES.U26", size: 4, averagePrice: 5490, type: 2 }];
 
   const payload = buildStatusPayload(worker);
-  assert.deepEqual(payload.strategyA.account, { id: 2, name: "PRAC-V2-416538-98727790", balance: 149989.47 });
-  assert.equal(payload.strategyA.openPositions.length, 1);
-  assert.equal(payload.strategyA.openPositions[0].size, 4);
-  // The "default" account fields are untouched by strategyA's own state
+  assert.deepEqual(payload.orderFlowBot.account, { id: 2, name: "PRAC-V2-416538-98727790", balance: 149989.47 });
+  assert.equal(payload.orderFlowBot.openPositions.length, 1);
+  assert.equal(payload.orderFlowBot.openPositions[0].size, 4);
+  // The "default" account fields are untouched by the Order Flow Bot's own state
   assert.equal(payload.account.balance, 49586.83);
   assert.equal(payload.openPositions.length, 1);
 });
@@ -65,8 +64,8 @@ test("buildStatusPayload: reflects live GEX/basis/regime/day-state once populate
   worker.basisAsOf = new Date("2026-07-24T14:00:00Z");
   worker.rebuildLevels();
   worker.lastRegimeInfo = { regime: "NEG_GAMMA", baseRegime: "NEG_GAMMA", nearFlip: false };
-  worker.riskManager.recordOrbTrade("long");
-  worker.riskManager.recordTradeResult("A", -100);
+  worker.riskManager.recordOrderFlowTrade("VA_HIGH:5530.00", 1000);
+  worker.riskManager.recordTradeResult("OF", -100);
   worker.bars.push({ close: 5522 });
 
   const payload = buildStatusPayload(worker);
@@ -75,8 +74,8 @@ test("buildStatusPayload: reflects live GEX/basis/regime/day-state once populate
   assert.equal(payload.gex.netGex, -5e9);
   assert.equal(payload.flipPointEs, 5408);
   assert.equal(payload.basis, 8);
-  assert.deepEqual(payload.dayState.orbTradedDirections, ["long"]);
-  assert.equal(payload.dayState.lossesToday.A, 1);
+  assert.equal(payload.dayState.orderFlowTradesToday, 1);
+  assert.equal(payload.dayState.lossesToday.OF, 1);
 });
 
 test("buildStatusPayload: recentLog returns at most the last 50 rows, most recent first", () => {
