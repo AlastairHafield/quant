@@ -21,6 +21,7 @@ import {
 import { SessionRiskManager, checkDataHealth, checkRecalcSettle, computeSizeMultiplier } from "./riskSession.js";
 import { ladderRatio } from "./sizing.js";
 import { evaluateExit } from "./exitRules.js";
+import * as depthBook from "./depthBook.js";
 import { startStatusReporter } from "./statusReporter.js";
 import { SignalLogger, buildLogRow } from "./logger.js";
 import {
@@ -89,14 +90,27 @@ export function shouldFlattenNow(t, config) {
 // bot wasn't evaluating anything that whole stretch, not just missing
 // Strategy B's narrower trigger. Only checked during the trading day itself;
 // a long quiet gap overnight/on weekends is normal, not a failure.
-export function isBarStreamStale(lastBarReceivedAt, now, config) {
+function isStreamStale(lastReceivedAt, now, config, thresholdMin) {
   const withinTradingDay =
     minutesOf(now) >= config.sessionOpenET.h * 60 + config.sessionOpenET.m &&
     minutesOf(now) < config.sessionEndET.h * 60 + config.sessionEndET.m;
   if (!withinTradingDay) return false;
-  if (lastBarReceivedAt == null) return false; // never connected yet — subscribeBarsWithRetry's own retry covers this
-  const staleMs = now.getTime() - lastBarReceivedAt.getTime();
-  return staleMs > config.barStaleThresholdMin * 60_000;
+  if (lastReceivedAt == null) return false; // never connected yet — the retry wrapper's own retry covers this
+  const staleMs = now.getTime() - lastReceivedAt.getTime();
+  return staleMs > thresholdMin * 60_000;
+}
+
+export function isBarStreamStale(lastBarReceivedAt, now, config) {
+  return isStreamStale(lastBarReceivedAt, now, config, config.barStaleThresholdMin);
+}
+
+// Depth's own twin of the bar-staleness watchdog — the same live incident
+// risk (a SignalR subscription that's technically still connected but
+// silently stopped delivering messages, only caught because a separate
+// REST poll kept working and masked it) applies equally here, on a wholly
+// separate hub subscription from the bar/trade one.
+export function isDepthStreamStale(lastDepthEventAt, now, config) {
+  return isStreamStale(lastDepthEventAt, now, config, config.depthStaleThresholdMin);
 }
 
 // Returns the day-key to flush for if it's at/past the scheduled flush time,
@@ -195,6 +209,17 @@ export class Worker {
     this.accountAsOf = null;
     this.trackedTrades = []; // locally-tracked open trades, for MFE/MAE + closure detection
     this.lastBarReceivedAt = null; // real wall-clock time — see isBarStreamStale
+    this.footprintBars = []; // per-minute footprint levels, from FootprintBarAggregator — see onFootprintBar
+    this.lastFootprintBarAt = null; // real wall-clock time — see isDepthStreamStale's depth-side twin
+    this.depthBook = new depthBook.DepthBookAggregator();
+  }
+
+  // Same convention as onBar's trade-bar handling: just accumulates for now.
+  // Not yet consumed by any signal logic (Phase 4) — Phase 3e's job is only
+  // proving the plumbing works and is visible on the dashboard.
+  onFootprintBar(levels) {
+    this.lastFootprintBarAt = new Date();
+    this.footprintBars.push(levels);
   }
 
   async resolveAccountIdForRole(role) {
@@ -1120,12 +1145,33 @@ export function createWorker() {
 // and reconnect if bars ever go quiet mid-session.
 async function subscribeBarsWithRetry(worker, attempt = 1) {
   try {
-    return await topstepx.subscribeBars(CONFIG.instrumentData, (bar) => worker.onBar(bar));
+    return await topstepx.subscribeBars(
+      CONFIG.instrumentData,
+      (bar) => worker.onBar(bar),
+      (levels) => worker.onFootprintBar(levels)
+    );
   } catch (e) {
     const waitMs = Math.min(5000 * attempt, 60000);
     console.error(`subscribeBars failed (attempt ${attempt}): ${e.message} — retrying in ${waitMs / 1000}s`);
     await new Promise((resolve) => setTimeout(resolve, waitMs));
     return subscribeBarsWithRetry(worker, attempt + 1);
+  }
+}
+
+// Depth's own twin of subscribeBarsWithRetry, same reasoning (an unretried
+// initial-connect failure is an unhandled rejection that crashes the whole
+// process) — a wholly separate hub subscription from bars/trades, so it
+// needs its own independent retry loop rather than piggybacking on the bar
+// one. Phase 3b/3c: DepthBookAggregator.onDepthEvent just logs the raw
+// payload for now (real parsing lands once the live shape is confirmed).
+async function subscribeDepthWithRetry(worker, attempt = 1) {
+  try {
+    return await topstepx.subscribeDepth(CONFIG.instrumentData, (data) => worker.depthBook.onDepthEvent(data));
+  } catch (e) {
+    const waitMs = Math.min(5000 * attempt, 60000);
+    console.error(`subscribeDepth failed (attempt ${attempt}): ${e.message} — retrying in ${waitMs / 1000}s`);
+    await new Promise((resolve) => setTimeout(resolve, waitMs));
+    return subscribeDepthWithRetry(worker, attempt + 1);
   }
 }
 
@@ -1156,6 +1202,7 @@ async function startWorker() {
     5000
   );
   let barConnection = await subscribeBarsWithRetry(worker);
+  let depthConnection = await subscribeDepthWithRetry(worker);
 
   // Forces a fresh SignalR connection if bars go quiet mid-session — see
   // isBarStreamStale. .stop() before reconnecting so the old (zombie)
@@ -1170,6 +1217,20 @@ async function startWorker() {
       console.error("Error stopping stale bar connection:", e.message);
     }
     barConnection = await subscribeBarsWithRetry(worker);
+  }, 60_000);
+
+  // Depth's own twin of the watchdog above — a separate hub subscription
+  // from bars, so it needs its own independent staleness check and reconnect.
+  setInterval(async () => {
+    if (!isDepthStreamStale(worker.depthBook.lastEventAt, nowET(), CONFIG)) return;
+    const staleMin = Math.round((Date.now() - worker.depthBook.lastEventAt.getTime()) / 60_000);
+    console.error(`No depth events received in ~${staleMin}min during the trading day — forcing a SignalR reconnect`);
+    try {
+      await depthConnection.stop();
+    } catch (e) {
+      console.error("Error stopping stale depth connection:", e.message);
+    }
+    depthConnection = await subscribeDepthWithRetry(worker);
   }, 60_000);
 
   // Reads "already flushed today" from Mongo rather than an in-memory flag —

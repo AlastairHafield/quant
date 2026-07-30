@@ -12,6 +12,7 @@ import {
   isLiveExecutionAllowed,
   accountRoleFor,
   isBarStreamStale,
+  isDepthStreamStale,
 } from "../src/worker.js";
 import { CONFIG } from "../src/config.js";
 
@@ -54,6 +55,17 @@ test("isBarStreamStale: false when the last bar is recent, true once it exceeds 
   const stale = new Date(2026, 6, 29, 9, 55); // 5 min ago, threshold is 3
   assert.equal(isBarStreamStale(recent, now, CONFIG), false);
   assert.equal(isBarStreamStale(stale, now, CONFIG), true);
+});
+
+test("isDepthStreamStale: depth's own independent twin of isBarStreamStale, same trading-day/threshold logic", () => {
+  const now = new Date(2026, 6, 29, 10, 0); // 10am ET
+  const recent = new Date(2026, 6, 29, 9, 58);
+  const stale = new Date(2026, 6, 29, 9, 55); // depthStaleThresholdMin is 3
+  assert.equal(isDepthStreamStale(recent, now, CONFIG), false);
+  assert.equal(isDepthStreamStale(stale, now, CONFIG), true);
+  assert.equal(isDepthStreamStale(null, now, CONFIG), false); // never connected yet
+  const outsideTradingDay = new Date(2026, 6, 29, 6, 0);
+  assert.equal(isDepthStreamStale(stale, outsideTradingDay, CONFIG), false);
 });
 
 test("shouldFlattenNow: false before flattenAtET, true at/after it", () => {
@@ -335,6 +347,20 @@ test("Worker: onBar updates MFE/MAE for every tracked trade as new bars arrive",
   worker.onBar(esBar({ high: 5508, low: 5480, close: 5490, buyVolume: 5, sellVolume: 20 }), new Date(2026, 6, 24, 9, 11));
   assert.equal(worker.trackedTrades[0].mfe, 10); // unchanged, prior bar's high was better
   assert.equal(worker.trackedTrades[0].mae, 20); // 5500-5480, new worse adverse excursion
+});
+
+test("Worker: onFootprintBar accumulates levels and records the last-received time", () => {
+  const worker = createWorker();
+  assert.equal(worker.lastFootprintBarAt, null);
+  assert.deepEqual(worker.footprintBars, []);
+
+  worker.onFootprintBar([{ price: 5500, buyVolume: 10, sellVolume: 2 }]);
+  assert.equal(worker.footprintBars.length, 1);
+  assert.deepEqual(worker.footprintBars[0], [{ price: 5500, buyVolume: 10, sellVolume: 2 }]);
+  assert.notEqual(worker.lastFootprintBarAt, null);
+
+  worker.onFootprintBar([{ price: 5501, buyVolume: 3, sellVolume: 8 }]);
+  assert.equal(worker.footprintBars.length, 2);
 });
 
 test("Worker: evaluateOpenTrades dispatches a non-HOLD evaluateExit result (failed breakout) for a tracked trade", () => {

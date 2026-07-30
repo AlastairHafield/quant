@@ -1,4 +1,16 @@
 import { CONFIG } from "./config.js";
+import { buildFootprintZones } from "./footprint.js";
+import { topHeatmapZones } from "./depthBook.js";
+
+// Only a bar/depth-staleness THRESHOLD check (isBarStreamStale/
+// isDepthStreamStale) knows about trading-day bounds — "connected" here just
+// means an event has arrived recently at all, useful at a glance regardless
+// of session time (e.g. confirming the depth hub is live overnight before
+// Phase 3b's shape-confirmation session even starts during RTH).
+function recentlyEventedWithin(lastEventAt, maxAgeMin) {
+  if (!lastEventAt) return false;
+  return Date.now() - lastEventAt.getTime() <= maxAgeMin * 60_000;
+}
 
 export function buildStatusPayload(worker) {
   const lastBar = worker.bars.length ? worker.bars[worker.bars.length - 1] : null;
@@ -43,6 +55,19 @@ export function buildStatusPayload(worker) {
       openPositions: worker.openPositionsA,
     },
     recentLog: worker.logger.buffer.slice(-50).reverse(),
+    // Order Flow Bot Phase 3 diagnostics — footprint/depth aren't wired into
+    // any signal logic yet (Phase 4), this just proves the plumbing is
+    // connected and visible. activeZones/topDepthZones are computed fresh
+    // each push rather than cached on the worker, same as regime/levels.
+    orderFlowDiagnostics: {
+      footprintConnected: recentlyEventedWithin(worker.lastFootprintBarAt, CONFIG.barStaleThresholdMin),
+      lastFootprintBarAt: worker.lastFootprintBarAt ? worker.lastFootprintBarAt.toISOString() : null,
+      depthConnected: recentlyEventedWithin(worker.depthBook.lastEventAt, CONFIG.depthStaleThresholdMin),
+      lastDepthEventAt: worker.depthBook.lastEventAt ? worker.depthBook.lastEventAt.toISOString() : null,
+      activeZones: buildFootprintZones(worker.footprintBars, CONFIG.orderFlowBot.footprint),
+      topDepthZones: topHeatmapZones(worker.depthBook.heatmap, 5),
+      zoneCooldowns: [...worker.riskManager.zoneCooldowns.keys()],
+    },
     updatedAt: new Date().toISOString(),
   };
 }

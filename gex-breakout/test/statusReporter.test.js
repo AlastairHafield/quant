@@ -27,6 +27,27 @@ test("buildStatusPayload: sane defaults before any data has arrived", () => {
   assert.equal(payload.orderFlowBot.signalOnly, true);
   assert.equal(payload.orderFlowBot.account, null);
   assert.deepEqual(payload.orderFlowBot.openPositions, []);
+  assert.equal(payload.orderFlowDiagnostics.footprintConnected, false);
+  assert.equal(payload.orderFlowDiagnostics.lastFootprintBarAt, null);
+  assert.equal(payload.orderFlowDiagnostics.depthConnected, false);
+  assert.equal(payload.orderFlowDiagnostics.lastDepthEventAt, null);
+  assert.deepEqual(payload.orderFlowDiagnostics.activeZones, []);
+  assert.deepEqual(payload.orderFlowDiagnostics.topDepthZones, []);
+  assert.deepEqual(payload.orderFlowDiagnostics.zoneCooldowns, []);
+});
+
+test("buildStatusPayload: orderFlowDiagnostics reports connectivity once footprint/depth events arrive", () => {
+  const worker = createWorker();
+  worker.onFootprintBar([{ price: 5500, buyVolume: 60, sellVolume: 5 }]);
+  worker.depthBook.onDepthEvent({ anything: "unconfirmed shape" });
+  worker.riskManager.recordOrderFlowTrade("VA_HIGH:5530.00", Date.now());
+
+  const payload = buildStatusPayload(worker);
+  assert.equal(payload.orderFlowDiagnostics.footprintConnected, true);
+  assert.notEqual(payload.orderFlowDiagnostics.lastFootprintBarAt, null);
+  assert.equal(payload.orderFlowDiagnostics.depthConnected, true);
+  assert.notEqual(payload.orderFlowDiagnostics.lastDepthEventAt, null);
+  assert.deepEqual(payload.orderFlowDiagnostics.zoneCooldowns, ["VA_HIGH:5530.00"]);
 });
 
 test("buildStatusPayload: reflects live account balance/positions once polled", () => {

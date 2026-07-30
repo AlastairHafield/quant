@@ -23,6 +23,11 @@ export const CONFIG = {
   // arrive roughly every minute, so 3x that comfortably absorbs a normal
   // brief lull without false-triggering on real quiet periods.
   barStaleThresholdMin: 3,
+  // Depth's own version of the same watchdog — untested against a real
+  // GatewayDepth cadence yet (that hub isn't live-connected until Phase 3b),
+  // so this starts at the same threshold as bars and should be tuned once
+  // real event frequency is observed.
+  depthStaleThresholdMin: 3,
 
   gex: {
     // GEX_strike = gamma * OI * 100 * spot^2 * 0.01
