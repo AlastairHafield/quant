@@ -21,6 +21,10 @@ import {
 import { SessionRiskManager, checkDataHealth, checkRecalcSettle, computeSizeMultiplier } from "./riskSession.js";
 import { ladderRatio } from "./sizing.js";
 import { evaluateExit } from "./exitRules.js";
+import { evaluateOrderFlowExit, nearestZonePriceFor } from "./orderFlowExits.js";
+import { evaluateOrderFlowBot } from "./orderFlowBot.js";
+import { buildFootprintZones } from "./footprint.js";
+import { buildSessionProfile, findPOC, computeValueArea } from "./volumeProfile.js";
 import * as depthBook from "./depthBook.js";
 import { startStatusReporter } from "./statusReporter.js";
 import { SignalLogger, buildLogRow } from "./logger.js";
@@ -212,11 +216,18 @@ export class Worker {
     this.footprintBars = []; // per-minute footprint levels, from FootprintBarAggregator — see onFootprintBar
     this.lastFootprintBarAt = null; // real wall-clock time — see isDepthStreamStale's depth-side twin
     this.depthBook = new depthBook.DepthBookAggregator(CONFIG.orderFlowBot.depth);
+    this.lastFootprintZones = null; // recomputed each bar in tryOrderFlow, cached for visibility
+    this.sessionVolumeProfile = null; // ditto
+    // Index into this.bars where TODAY's bars start — this.bars itself is
+    // never trimmed at day rollover (multi-day history is fine for most uses,
+    // e.g. MFE/MAE on a trade spanning a restart), but the session volume
+    // profile specifically needs to mean "today's session," not "every bar
+    // since this process last started." Set in checkDayRollover.
+    this.todaySessionStartIndex = 0;
   }
 
-  // Same convention as onBar's trade-bar handling: just accumulates for now.
-  // Not yet consumed by any signal logic (Phase 4) — Phase 3e's job is only
-  // proving the plumbing works and is visible on the dashboard.
+  // Same convention as onBar's trade-bar handling: just accumulates.
+  // Consumed by tryOrderFlow to build this bar's footprint zones.
   onFootprintBar(levels) {
     this.lastFootprintBarAt = new Date();
     this.footprintBars.push(levels);
@@ -514,6 +525,10 @@ export class Worker {
     this.currentDay = dayKey;
     this.pendingB = null;
     this.riskManager.resetDay();
+    // Called before this bar is pushed to this.bars — its current length is
+    // exactly "every bar from prior days," so today's bars start right here.
+    this.todaySessionStartIndex = this.bars.length;
+    this.footprintBars = [];
   }
 
   onBar(rawBar, t = nowET()) {
@@ -627,18 +642,54 @@ export class Worker {
     this.tryStrategyB(bar, prevBar, idx, t, regimeInfo);
   }
 
-  // Placeholder — the Order Flow Bot's real zone/trigger/signal logic lands
-  // in Phase 4 of the order-flow-bot plan (volumeProfile.js/footprint.js/
-  // depthBook.js/orderFlowBot.js). Unlike Strategy A/B, absorption/path-of-
-  // least-resistance/lack-of-participation are all retrospective (computed
-  // off the trailing bar window ending at the current bar), so this needs no
-  // pending-breakout-then-confirm-bar scaffold the way tryStrategyB still has
-  // — it can evaluate synchronously once real logic is wired in.
+  // Unlike Strategy A/B, absorption/path-of-least-resistance/lack-of-
+  // participation are all retrospective (computed off the trailing bar
+  // window ending at the current bar), so this needs no pending-breakout-
+  // then-confirm-bar scaffold the way tryStrategyB still has — it evaluates
+  // synchronously.
   tryOrderFlow(bar, prevBar, idx, t, regimeInfo) {
     if (!this.riskManager.canTrade("OF")) return;
-    // No signals yet — this is the safe placeholder that lets the worker
-    // boot and run cleanly with Strategy A/ORB removed, before the Order
-    // Flow Bot's own signal logic is built.
+
+    // Recomputed fresh each bar — cheap at session-length bar/footprint-bar
+    // counts, same reasoning detectConsolidation already relies on.
+    this.lastFootprintZones = buildFootprintZones(this.footprintBars, CONFIG.orderFlowBot.footprint);
+
+    const sessionBars = this.bars.slice(this.todaySessionStartIndex);
+    let valueArea = null;
+    // Below minSessionBars, a value area is just noise — no zone rather than
+    // an untrustworthy one.
+    if (sessionBars.length >= CONFIG.orderFlowBot.volumeProfile.minSessionBars) {
+      this.sessionVolumeProfile = buildSessionProfile(sessionBars, CONFIG.orderFlowBot.volumeProfile);
+      const poc = findPOC(this.sessionVolumeProfile);
+      valueArea = computeValueArea(this.sessionVolumeProfile, poc, CONFIG.orderFlowBot.volumeProfile.valueAreaPct);
+    }
+
+    const absorptionWindow = buildAbsorptionWindow(this.bars, idx, CONFIG.orderFlow.absorption);
+
+    const result = evaluateOrderFlowBot({
+      nowET: t,
+      bars: this.bars,
+      index: idx,
+      regimeInfo,
+      footprintZones: this.lastFootprintZones,
+      valueArea,
+      touchWindow: absorptionWindow?.touchWindow ?? null,
+      priorBars: absorptionWindow?.priorBars ?? [],
+      walls: this.levelState.wallsEs,
+      config: CONFIG,
+      dayState: this.riskManager.dayState,
+    });
+    if (result) {
+      // No breakout-flow grading exists for the Order Flow Bot's own
+      // triggers (absorption/path-of-least-resistance/lack-of-participation/
+      // failed-auction ARE the confirmation, unlike Strategy A/B's separate
+      // delta-confirmation grade) — a fixed grade "B" is a deliberate,
+      // conservative default (the smaller of the two configured sizes,
+      // risk.sizing.B) pending real observation of which triggers actually
+      // deserve more size. Revisit once Phase 6's manual signal review has
+      // real trades to judge against.
+      this.handleSignal(result, regimeInfo, { grade: "B" });
+    }
   }
 
   tryStrategyB(bar, prevBar, idx, t, regimeInfo) {
@@ -794,21 +845,35 @@ export class Worker {
 
       const currentRegimeBase = this.lastRegimeInfo?.baseRegime ?? null;
       const absorption = buildAbsorptionWindow(this.bars, currentIndex, CONFIG.orderFlow.absorption);
-      const result = evaluateExit({
-        direction: trade.direction,
-        currentBar: bar,
-        brokenLevel: trade.brokenLevel,
-        entryIndex: trade.entryIndex,
-        currentIndex,
-        bars: this.bars,
-        inOpenSpace: isInOpenSpace(bar.close, trade.direction, this.levelState.wallsEs, CONFIG.levels.wallFilter),
-        prevRegimeBase: trade.lastRegimeBase,
-        currentRegimeBase,
-        touchWindow: absorption?.touchWindow ?? null,
-        priorBars: absorption?.priorBars ?? [],
-        levelPriceForAbsorption: trade.targetPrice,
-        config: CONFIG,
-      });
+      const result =
+        trade.strategy === "OF"
+          ? evaluateOrderFlowExit({
+              direction: trade.direction,
+              entryIndex: trade.entryIndex,
+              currentIndex,
+              bars: this.bars,
+              touchWindow: absorption?.touchWindow ?? null,
+              priorBars: absorption?.priorBars ?? [],
+              levelPriceForAbsorption: trade.targetPrice,
+              isTrendDay: currentRegimeBase === "NEG_GAMMA",
+              nearestZonePrice: nearestZonePriceFor(this.lastFootprintZones ?? [], trade.direction, bar.close),
+              config: CONFIG,
+            })
+          : evaluateExit({
+              direction: trade.direction,
+              currentBar: bar,
+              brokenLevel: trade.brokenLevel,
+              entryIndex: trade.entryIndex,
+              currentIndex,
+              bars: this.bars,
+              inOpenSpace: isInOpenSpace(bar.close, trade.direction, this.levelState.wallsEs, CONFIG.levels.wallFilter),
+              prevRegimeBase: trade.lastRegimeBase,
+              currentRegimeBase,
+              touchWindow: absorption?.touchWindow ?? null,
+              priorBars: absorption?.priorBars ?? [],
+              levelPriceForAbsorption: trade.targetPrice,
+              config: CONFIG,
+            });
       trade.lastRegimeBase = currentRegimeBase;
       if (result.action === "HOLD") continue;
 
@@ -841,6 +906,14 @@ export class Worker {
       const window = this.bars.slice(Math.max(0, this.bars.length - trailBars));
       const newStopPrice =
         trade.direction === "long" ? Math.min(...window.map((b) => b.low)) : Math.max(...window.map((b) => b.high));
+      const tighter = trade.direction === "long" ? newStopPrice > trade.stopPrice : newStopPrice < trade.stopPrice;
+      if (!tighter) return; // never loosens the stop
+      await this.moveStop(trade, newStopPrice, bar.close, result.reason);
+      return;
+    }
+
+    if (result.action === "TIGHTEN_TO_PRICE") {
+      const newStopPrice = result.price;
       const tighter = trade.direction === "long" ? newStopPrice > trade.stopPrice : newStopPrice < trade.stopPrice;
       if (!tighter) return; // never loosens the stop
       await this.moveStop(trade, newStopPrice, bar.close, result.reason);

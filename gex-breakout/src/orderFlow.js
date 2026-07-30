@@ -136,3 +136,74 @@ export function evaluateBreakoutFlow(bars, breakoutIndex, direction, levelPrice,
 
   return { grade, avgAbsDelta, cumDeltaNewExtreme, divergence, absorbed };
 }
+
+// "Path of least resistance": price advances CLEANLY in one direction (every
+// bar's close at least matches the bar before it, not chopping back and
+// forth) on unusually LIGHT volume — no one's fighting the move — while
+// cumulative delta agrees. The opposite signature from absorption (heavy
+// volume, stalled price). A trend-CONTINUATION trigger, not a fade — returns
+// the direction the tape is already moving, not the opposite. Retrospective
+// over the trailing `lookbackBars` ending at `index`, like this module's
+// other triggers (no forward-looking confirmation bar).
+export function detectPathOfLeastResistance(bars, index, { lookbackBars, volumeLightMultiple, avgLookbackBars }) {
+  const start = Math.max(0, index - lookbackBars + 1);
+  const window = bars.slice(start, index + 1);
+  if (window.length < lookbackBars) return null;
+
+  const netMove = window[window.length - 1].close - window[0].close;
+  if (netMove === 0) return null;
+  const direction = netMove > 0 ? "long" : "short";
+
+  const cleanProgress = window.every((b, i) => {
+    if (i === 0) return true;
+    return direction === "long" ? b.close >= window[i - 1].close : b.close <= window[i - 1].close;
+  });
+  if (!cleanProgress) return null;
+
+  const barVolume = (b) => (b.volume ?? (b.buyVolume ?? 0) + (b.sellVolume ?? 0));
+  const windowVolume = window.reduce((s, b) => s + barVolume(b), 0);
+  const avgWindow = bars.slice(Math.max(0, start - avgLookbackBars), start);
+  const avgBarVolume = avgWindow.length ? avgWindow.reduce((s, b) => s + barVolume(b), 0) / avgWindow.length : 0;
+  const expectedVolume = avgBarVolume * window.length;
+  const lightVolume = expectedVolume > 0 && windowVolume < expectedVolume / volumeLightMultiple;
+  if (!lightVolume) return null;
+
+  const deltaAgrees =
+    direction === "long"
+      ? window[window.length - 1].cumDelta > window[0].cumDelta
+      : window[window.length - 1].cumDelta < window[0].cumDelta;
+  if (!deltaAgrees) return null;
+
+  return { direction };
+}
+
+// Exhaustion signal: volume DECLINING across the trailing window (interest
+// drying up) while cumulative delta's slope flattens or reverses (the crowd
+// pushing the move is backing off). Returns the FADE direction — opposite
+// the prior move — matching this trigger's role as a mean-reversion signal,
+// unlike path-of-least-resistance above. Retrospective, same convention as
+// this module's other triggers.
+export function detectLackOfParticipation(bars, index, { lookbackBars, volumeDeclineMultiple }) {
+  const start = Math.max(0, index - lookbackBars + 1);
+  const window = bars.slice(start, index + 1);
+  if (window.length < lookbackBars || window.length < 2) return null;
+
+  const half = Math.floor(window.length / 2);
+  const firstHalf = window.slice(0, half);
+  const secondHalf = window.slice(half);
+  const barVolume = (b) => (b.volume ?? (b.buyVolume ?? 0) + (b.sellVolume ?? 0));
+  const vol = (w) => w.reduce((s, b) => s + barVolume(b), 0);
+  const firstVol = vol(firstHalf);
+  const secondVol = vol(secondHalf);
+  if (!(firstVol > 0 && secondVol < firstVol / volumeDeclineMultiple)) return null;
+
+  const firstDeltaSlope = firstHalf[firstHalf.length - 1].cumDelta - firstHalf[0].cumDelta;
+  const secondDeltaSlope = secondHalf[secondHalf.length - 1].cumDelta - secondHalf[0].cumDelta;
+  if (firstDeltaSlope === 0) return null;
+  const priorDirection = firstDeltaSlope > 0 ? "long" : "short";
+  const flattenedOrReversed =
+    priorDirection === "long" ? secondDeltaSlope < firstDeltaSlope : secondDeltaSlope > firstDeltaSlope;
+  if (!flattenedOrReversed) return null;
+
+  return { direction: priorDirection === "long" ? "short" : "long" };
+}

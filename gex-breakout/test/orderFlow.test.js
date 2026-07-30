@@ -9,6 +9,8 @@ import {
   buildAbsorptionWindow,
   gradeFlow,
   evaluateBreakoutFlow,
+  detectPathOfLeastResistance,
+  detectLackOfParticipation,
 } from "../src/orderFlow.js";
 
 test("computeDelta is buy-aggressor minus sell-aggressor volume", () => {
@@ -267,4 +269,123 @@ test("evaluateBreakoutFlow: F when absorption fires at the breakout level", () =
   const result = evaluateBreakoutFlow(allBars, breakoutIndex, "long", 5500, orderFlowCfg);
   assert.equal(result.absorbed, true);
   assert.equal(result.grade, "F");
+});
+
+const polrCfg = { lookbackBars: 4, volumeLightMultiple: 2, avgLookbackBars: 3 };
+
+test("detectPathOfLeastResistance: clean light-volume advance with agreeing delta is a long trigger", () => {
+  const bars = [
+    { close: 90, buyVolume: 10, sellVolume: 10, cumDelta: 0 },
+    { close: 90, buyVolume: 10, sellVolume: 10, cumDelta: 0 },
+    { close: 90, buyVolume: 10, sellVolume: 10, cumDelta: 0 }, // avg window: 20 vol/bar
+    { close: 100, buyVolume: 5, sellVolume: 1, cumDelta: 10 },
+    { close: 101, buyVolume: 5, sellVolume: 1, cumDelta: 14 },
+    { close: 102, buyVolume: 5, sellVolume: 1, cumDelta: 18 },
+    { close: 103, buyVolume: 5, sellVolume: 1, cumDelta: 22 },
+  ];
+  assert.deepEqual(detectPathOfLeastResistance(bars, 6, polrCfg), { direction: "long" });
+});
+
+test("detectPathOfLeastResistance: a dip breaks 'clean' progress", () => {
+  const bars = [
+    { close: 90, buyVolume: 10, sellVolume: 10, cumDelta: 0 },
+    { close: 90, buyVolume: 10, sellVolume: 10, cumDelta: 0 },
+    { close: 90, buyVolume: 10, sellVolume: 10, cumDelta: 0 },
+    { close: 100, buyVolume: 5, sellVolume: 1, cumDelta: 10 },
+    { close: 99, buyVolume: 5, sellVolume: 1, cumDelta: 8 }, // dip
+    { close: 102, buyVolume: 5, sellVolume: 1, cumDelta: 18 },
+    { close: 103, buyVolume: 5, sellVolume: 1, cumDelta: 22 },
+  ];
+  assert.equal(detectPathOfLeastResistance(bars, 6, polrCfg), null);
+});
+
+test("detectPathOfLeastResistance: heavy volume disqualifies it (that's absorption's signature, not this one's)", () => {
+  const bars = [
+    { close: 90, buyVolume: 10, sellVolume: 10, cumDelta: 0 },
+    { close: 90, buyVolume: 10, sellVolume: 10, cumDelta: 0 },
+    { close: 90, buyVolume: 10, sellVolume: 10, cumDelta: 0 },
+    { close: 100, buyVolume: 20, sellVolume: 20, cumDelta: 10 },
+    { close: 101, buyVolume: 20, sellVolume: 20, cumDelta: 14 },
+    { close: 102, buyVolume: 20, sellVolume: 20, cumDelta: 18 },
+    { close: 103, buyVolume: 20, sellVolume: 20, cumDelta: 22 },
+  ];
+  assert.equal(detectPathOfLeastResistance(bars, 6, polrCfg), null);
+});
+
+test("detectPathOfLeastResistance: delta disagreeing with price disqualifies it", () => {
+  const bars = [
+    { close: 90, buyVolume: 10, sellVolume: 10, cumDelta: 0 },
+    { close: 90, buyVolume: 10, sellVolume: 10, cumDelta: 0 },
+    { close: 90, buyVolume: 10, sellVolume: 10, cumDelta: 0 },
+    { close: 100, buyVolume: 5, sellVolume: 1, cumDelta: 20 },
+    { close: 101, buyVolume: 5, sellVolume: 1, cumDelta: 18 },
+    { close: 102, buyVolume: 5, sellVolume: 1, cumDelta: 16 },
+    { close: 103, buyVolume: 5, sellVolume: 1, cumDelta: 14 }, // price up, cumDelta down
+  ];
+  assert.equal(detectPathOfLeastResistance(bars, 6, polrCfg), null);
+});
+
+test("detectPathOfLeastResistance: not enough bars yet", () => {
+  const bars = [
+    { close: 100, buyVolume: 5, sellVolume: 1, cumDelta: 10 },
+    { close: 101, buyVolume: 5, sellVolume: 1, cumDelta: 14 },
+  ];
+  assert.equal(detectPathOfLeastResistance(bars, 1, polrCfg), null);
+});
+
+const lopCfg = { lookbackBars: 4, volumeDeclineMultiple: 2 };
+
+test("detectLackOfParticipation: declining volume + flattening delta after an up-move is a short (fade) trigger", () => {
+  const bars = [
+    { buyVolume: 20, sellVolume: 5, cumDelta: 0 },
+    { buyVolume: 20, sellVolume: 5, cumDelta: 15 },
+    { buyVolume: 5, sellVolume: 5, cumDelta: 20 },
+    { buyVolume: 5, sellVolume: 5, cumDelta: 22 },
+  ];
+  assert.deepEqual(detectLackOfParticipation(bars, 3, lopCfg), { direction: "short" });
+});
+
+test("detectLackOfParticipation: declining volume + reversing delta after a down-move is a long (fade) trigger", () => {
+  const bars = [
+    { buyVolume: 20, sellVolume: 5, cumDelta: 0 },
+    { buyVolume: 20, sellVolume: 5, cumDelta: -15 },
+    { buyVolume: 5, sellVolume: 5, cumDelta: -18 },
+    { buyVolume: 5, sellVolume: 5, cumDelta: -16 },
+  ];
+  assert.deepEqual(detectLackOfParticipation(bars, 3, lopCfg), { direction: "long" });
+});
+
+test("detectLackOfParticipation: no signal when volume hasn't meaningfully declined", () => {
+  const bars = [
+    { buyVolume: 20, sellVolume: 5, cumDelta: 0 },
+    { buyVolume: 20, sellVolume: 5, cumDelta: 15 },
+    { buyVolume: 15, sellVolume: 15, cumDelta: 20 },
+    { buyVolume: 15, sellVolume: 15, cumDelta: 22 },
+  ];
+  assert.equal(detectLackOfParticipation(bars, 3, lopCfg), null);
+});
+
+test("detectLackOfParticipation: no signal when delta keeps accelerating in the same direction", () => {
+  const bars = [
+    { buyVolume: 20, sellVolume: 5, cumDelta: 0 },
+    { buyVolume: 20, sellVolume: 5, cumDelta: 15 },
+    { buyVolume: 5, sellVolume: 5, cumDelta: 25 },
+    { buyVolume: 5, sellVolume: 5, cumDelta: 40 }, // second-half slope (20) exceeds first-half (15)
+  ];
+  assert.equal(detectLackOfParticipation(bars, 3, lopCfg), null);
+});
+
+test("detectLackOfParticipation: no signal with an ambiguous (flat) first-half delta slope", () => {
+  const bars = [
+    { buyVolume: 20, sellVolume: 5, cumDelta: 10 },
+    { buyVolume: 20, sellVolume: 5, cumDelta: 10 },
+    { buyVolume: 5, sellVolume: 5, cumDelta: 12 },
+    { buyVolume: 5, sellVolume: 5, cumDelta: 14 },
+  ];
+  assert.equal(detectLackOfParticipation(bars, 3, lopCfg), null);
+});
+
+test("detectLackOfParticipation: not enough bars yet", () => {
+  const bars = [{ buyVolume: 20, sellVolume: 5, cumDelta: 0 }];
+  assert.equal(detectLackOfParticipation(bars, 0, lopCfg), null);
 });

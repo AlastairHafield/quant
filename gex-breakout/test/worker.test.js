@@ -177,6 +177,7 @@ test("checkDayRollover: resets pending Strategy B breakouts and risk-manager day
   worker.pendingB = { direction: "short" };
   worker.riskManager.recordTradeResult("OF", -100); // a loss recorded yesterday
   worker.riskManager.recordOrderFlowTrade("zone1", Date.now());
+  worker.footprintBars.push([{ price: 5500, buyVolume: 1, sellVolume: 1 }]);
 
   worker.checkDayRollover(new Date(2026, 6, 28, 0, 1)); // just past midnight, a new day
 
@@ -185,6 +186,17 @@ test("checkDayRollover: resets pending Strategy B breakouts and risk-manager day
   assert.equal(worker.riskManager.lossesToday.OF, undefined); // lazily-initialized, resetDay clears the whole object
   assert.equal(worker.riskManager.dayState.orderFlowTradesToday, 0);
   assert.equal(worker.riskManager.dayState.zoneCooldowns.size, 0);
+  assert.deepEqual(worker.footprintBars, []);
+});
+
+test("checkDayRollover: marks today's session as starting at this.bars' current length", () => {
+  const worker = createWorker();
+  worker.bars.push({ close: 100 }, { close: 101 }, { close: 102 }); // 3 bars from a prior day
+  worker.currentDay = new Date(2026, 6, 27).toDateString();
+
+  worker.checkDayRollover(new Date(2026, 6, 28, 0, 1));
+
+  assert.equal(worker.todaySessionStartIndex, 3);
 });
 
 test("checkDayRollover: a no-op when called again the same day (doesn't wipe in-progress state)", () => {
@@ -267,7 +279,48 @@ test("Worker end-to-end: a strategy's own loss/win halt stops further trading fo
     esBar({ high: 5523, low: 5520, close: 5522, buyVolume: 300, sellVolume: 50 }),
     new Date(2026, 6, 24, 9, 46)
   );
-  assert.equal(worker.logger.size, 0); // tryStrategyB bails out on its own halt; tryOrderFlow has no signal logic yet
+  assert.equal(worker.logger.size, 0); // both bail out on their own halt before evaluating any real trigger logic
+});
+
+test("Worker end-to-end: tryOrderFlow fires a real lack-of-participation signal against a live footprint zone", () => {
+  const worker = createWorker();
+  worker.gexSnapshot = { netGex: -5e9, flipPoint: 5400, walls: { aboveSpot: [], belowSpot: [] } }; // NEG_GAMMA
+  worker.basis = 0;
+  worker.rebuildLevels();
+
+  // 4 flat-close bars (rules out path-of-least-resistance, which needs net
+  // price movement) with volume declining by more than half and cumulative
+  // delta's slope flattening in the second half — lack-of-participation's
+  // exact trigger shape (see its own unit tests in orderFlow.test.js).
+  // Only 4 bars total, well short of buildAbsorptionWindow's ~23-bar
+  // requirement, so absorption is skipped and this really is exercising the
+  // lack-of-participation fallthrough, not absorption.
+  const t = (m) => new Date(2026, 6, 24, 10, m);
+  worker.onBar(esBar({ high: 5500.5, low: 5499.5, close: 5500, buyVolume: 20, sellVolume: 5 }), t(0));
+
+  // Set up AFTER the first onBar, not before — the first onBar of any
+  // session triggers checkDayRollover (currentDay starts null), which
+  // resets footprintBars; in real operation footprint data only ever
+  // arrives after that's already happened.
+  worker.onFootprintBar([
+    { price: 5498, buyVolume: 30, sellVolume: 1 },
+    { price: 5499, buyVolume: 30, sellVolume: 1 },
+    { price: 5500, buyVolume: 30, sellVolume: 1 },
+  ]);
+
+  worker.onBar(esBar({ high: 5500.5, low: 5499.5, close: 5500, buyVolume: 20, sellVolume: 5 }), t(1));
+  worker.onBar(esBar({ high: 5500.5, low: 5499.5, close: 5500, buyVolume: 5, sellVolume: 5 }), t(2));
+  worker.onBar(esBar({ high: 5500.5, low: 5499.5, close: 5500, buyVolume: 5, sellVolume: 5 }), t(3));
+
+  const row = worker.logger.buffer.find((r) => r.strategy === "OF");
+  assert.ok(row, "expected a logged Order Flow Bot signal");
+  assert.equal(row.veto_reason, null);
+  assert.equal(row.direction, "short");
+  assert.equal(row.entry_price, 5500);
+  assert.equal(row.stop_price, 5501);
+  assert.equal(row.target_price, 5000);
+  assert.equal(worker.riskManager.dayState.orderFlowTradesToday, 1);
+  assert.equal(worker.riskManager.dayState.zoneCooldowns.has("buy:5498.00-5500.00"), true);
 });
 
 test("evaluateSignals: does not evaluate before sessionOpenET (pre-market)", () => {
@@ -368,13 +421,14 @@ test("Worker: evaluateOpenTrades dispatches a non-HOLD evaluateExit result (fail
   worker.onBar(esBar({ high: 5501, low: 5499, close: 5500, buyVolume: 50, sellVolume: 50 }), new Date(2026, 6, 24, 10, 0));
   const entryIndex = worker.bars.length - 1;
   worker.trackedTrades.push({
-    strategy: "OF", direction: "long", entryPrice: 5500, stopPrice: 5490, originalStopPrice: 5490,
+    strategy: "B", direction: "long", entryPrice: 5500, stopPrice: 5490, originalStopPrice: 5490,
     targetPrice: 5520, originalTargetPrice: 5520, brokenLevel: 5500, entryIndex, lastRegimeBase: "NEG_GAMMA",
     movedToBreakeven: true, actionInFlight: false, contractId: "CON.F.US.EP.U26", size: 4, orderId: 1,
     mfe: 0, mae: 0, openedAt: "t",
   });
 
-  // Closes below brokenLevel(5500) - failedBreakoutPts(2) = 5498 -> EXIT_NOW.
+  // Strategy B routes through the generic evaluateExit. Closes below
+  // brokenLevel(5500) - failedBreakoutPts(2) = 5498 -> EXIT_NOW.
   // executionEnabled is false in tests, so the real broker call inside
   // actOnExitResult rejects (no credentials) and is caught asynchronously —
   // actionInFlight being true immediately after onBar (set synchronously,
@@ -389,7 +443,7 @@ test("Worker: evaluateOpenTrades leaves a healthy trade alone (HOLD)", () => {
   worker.onBar(esBar({ high: 5501, low: 5499, close: 5500, buyVolume: 50, sellVolume: 50 }), new Date(2026, 6, 24, 10, 0));
   const entryIndex = worker.bars.length - 1;
   worker.trackedTrades.push({
-    strategy: "OF", direction: "long", entryPrice: 5500, stopPrice: 5490, originalStopPrice: 5490,
+    strategy: "B", direction: "long", entryPrice: 5500, stopPrice: 5490, originalStopPrice: 5490,
     targetPrice: 5520, originalTargetPrice: 5520, brokenLevel: 5500, entryIndex, lastRegimeBase: "NEG_GAMMA",
     movedToBreakeven: true, actionInFlight: false, contractId: "CON.F.US.EP.U26", size: 4, orderId: 1,
     mfe: 0, mae: 0, openedAt: "t",
@@ -397,6 +451,27 @@ test("Worker: evaluateOpenTrades leaves a healthy trade alone (HOLD)", () => {
 
   worker.onBar(esBar({ high: 5503, low: 5501, close: 5502, buyVolume: 50, sellVolume: 50 }), new Date(2026, 6, 24, 10, 1));
   assert.equal(worker.trackedTrades[0].actionInFlight, false);
+});
+
+test("Worker: evaluateOpenTrades dispatches TIGHTEN_TO_PRICE for an Order Flow Bot trade trailing a zone on a trend day", () => {
+  const worker = createWorker();
+  worker.onBar(esBar({ high: 5501, low: 5499, close: 5500, buyVolume: 50, sellVolume: 50 }), new Date(2026, 6, 24, 10, 0));
+  const entryIndex = worker.bars.length - 1;
+  worker.lastRegimeInfo = { baseRegime: "NEG_GAMMA" }; // trend day -> trail instead of a fixed TP
+  worker.lastFootprintZones = [{ side: "buy", low: 5490, high: 5495 }]; // below price -> eligible to trail behind for a long
+  worker.trackedTrades.push({
+    strategy: "OF", direction: "long", entryPrice: 5500, stopPrice: 5480, originalStopPrice: 5480,
+    targetPrice: 6000, originalTargetPrice: 6000, brokenLevel: 5500, entryIndex, lastRegimeBase: "NEG_GAMMA",
+    movedToBreakeven: true, actionInFlight: false, contractId: "CON.F.US.EP.U26", size: 4, orderId: 1,
+    mfe: 0, mae: 0, openedAt: "t",
+  });
+
+  // stopPrice(5480) sits well below the zone's high(5495) -> TIGHTEN_TO_PRICE
+  // moves it up to 5495, which is tighter, so actOnExitResult dispatches —
+  // proven the same way the EXIT_NOW test above does (actionInFlight set
+  // synchronously before the broker call's rejection settles).
+  worker.onBar(esBar({ high: 5503, low: 5501, close: 5502, buyVolume: 50, sellVolume: 50 }), new Date(2026, 6, 24, 10, 1));
+  assert.equal(worker.trackedTrades[0].actionInFlight, true);
 });
 
 test("Worker: detectClosedTrades logs a closed-trade row (with MFE/MAE) once the broker no longer reports the position", async () => {

@@ -122,6 +122,17 @@ export const CONFIG = {
       // the L2 addition actually help" as two separate go-live decisions.
       gateEntries: false,
     },
+    // Trend-continuation trigger — see orderFlow.js's detectPathOfLeastResistance.
+    pathOfLeastResistance: {
+      lookbackBars: 4,
+      volumeLightMultiple: 2,
+      avgLookbackBars: 20,
+    },
+    // Exhaustion/fade trigger — see orderFlow.js's detectLackOfParticipation.
+    lackOfParticipation: {
+      lookbackBars: 4,
+      volumeDeclineMultiple: 2,
+    },
     exit: {
       trendTrailBufferPts: 2,
       // Only used if TopstepX's bracket API turns out to reject a null/omitted
