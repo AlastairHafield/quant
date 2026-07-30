@@ -601,8 +601,14 @@ export class Worker {
     // pre-market trade at 02:04 ET on 2026-07-30, the same morning that gate
     // shipped. Decided live to keep both strategies confined to
     // sessionOpenET-entryCutoffET rather than leave that window open.
+    //
+    // Floor later raised from sessionOpenET to entryFloorET (9:45, same day)
+    // — user's call: no new entries in the first 15 minutes of RTH at all,
+    // too volatile, easy to get stopped out on an opening wick. Matches
+    // mechanical-orb's own opening-range window, which already can't enter
+    // that early by construction.
     const minutes = minutesOf(t);
-    if (minutes < CONFIG.sessionOpenET.h * 60 + CONFIG.sessionOpenET.m) return;
+    if (minutes < CONFIG.entryFloorET.h * 60 + CONFIG.entryFloorET.m) return;
     if (minutes >= CONFIG.entryCutoffET.h * 60 + CONFIG.entryCutoffET.m) return;
 
     if (this.basisAsOf) {

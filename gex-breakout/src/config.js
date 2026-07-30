@@ -9,6 +9,13 @@ export const CONFIG = {
   maxDte: 5,
 
   sessionOpenET: { h: 9, m: 30 },
+  // No new entries in the first 15 minutes of RTH (user's call, 2026-07-30):
+  // the open is too volatile, easy to get stopped out on a wick — separate
+  // from sessionOpenET itself, which stays the trading-day boundary for
+  // isBarStreamStale/isDepthStreamStale's staleness watchdogs. Matches
+  // mechanical-orb's own 15-min opening-range window, which already can't
+  // enter before this time by construction.
+  entryFloorET: { h: 9, m: 45 },
   entryCutoffET: { h: 12, m: 0 }, // matches mechanical-orb's entry window
   flattenAtET: { h: 15, m: 55 }, // matches mechanical-orb's EOD flatten time
   sessionEndET: { h: 16, m: 0 },

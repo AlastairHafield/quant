@@ -456,7 +456,7 @@ test("evaluateSignals: does not evaluate before sessionOpenET (pre-market)", () 
   assert.equal(worker.lastRegimeInfo, null);
 });
 
-test("evaluateSignals: evaluates normally at/after sessionOpenET", () => {
+test("evaluateSignals: still does not evaluate during the first 15 minutes of RTH (9:30-9:44)", () => {
   const worker = createWorker();
   worker.gexSnapshot = { netGex: -5e9, flipPoint: 5400, walls: { aboveSpot: [], belowSpot: [] } };
   worker.basis = 0;
@@ -465,6 +465,19 @@ test("evaluateSignals: evaluates normally at/after sessionOpenET", () => {
   worker.onBar(
     esBar({ high: 5523, low: 5520, close: 5522, buyVolume: 300, sellVolume: 50 }),
     new Date(2026, 6, 24, 9, 30)
+  );
+  assert.equal(worker.lastRegimeInfo, null); // sessionOpenET alone no longer lets it through
+});
+
+test("evaluateSignals: evaluates normally at/after entryFloorET (9:45)", () => {
+  const worker = createWorker();
+  worker.gexSnapshot = { netGex: -5e9, flipPoint: 5400, walls: { aboveSpot: [], belowSpot: [] } };
+  worker.basis = 0;
+  worker.rebuildLevels();
+
+  worker.onBar(
+    esBar({ high: 5523, low: 5520, close: 5522, buyVolume: 300, sellVolume: 50 }),
+    new Date(2026, 6, 24, 9, 45)
   );
   assert.notEqual(worker.lastRegimeInfo, null); // reached regime classification — the gate let it through
 });
