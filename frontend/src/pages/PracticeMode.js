@@ -6,6 +6,13 @@ const fmtUsd = (n) => typeof n === 'number' ? (n >= 0 ? '+$' : '-$') + Math.abs(
 const fmtTime = (iso) => iso ? new Date(iso).toLocaleString('en-US', { hour12: false }) : '—';
 const ageSec = (iso) => iso ? Math.round((Date.now() - new Date(iso).getTime()) / 1000) : null;
 
+// Mirrors gex-breakout's CONFIG.orderFlowBot.volumeProfile.minSessionBars —
+// this codebase has no shared config layer between frontend/backend
+// (StrategyConfig.js's whole page is a manually-maintained static snapshot
+// for the same reason), so this is a display-only approximation of "how far
+// along is today's session" while the value area is still forming.
+const MIN_SESSION_BARS = 30;
+
 // GEX Breakout's Order Flow Bot is currently the only strategy running on a
 // practice account — everything else (Strategy B, Mechanical ORB, Gap
 // Continuation) trades the real Combine. This page pulls GEX Breakout's
@@ -72,6 +79,7 @@ export default function PracticeMode() {
   }
 
   const a = status.orderFlowBot;
+  const diag = status.orderFlowDiagnostics || {};
   const stale = ageSec(status.updatedAt) > 15;
   const aLog = (status.recentLog || []).filter((row) => row.strategy === 'OF');
 
@@ -115,6 +123,53 @@ export default function PracticeMode() {
             {closed.length} ({wins}W/{losses}L), {fmtUsd(totalPnl)}
           </div>
         </div>
+        <div className="metric">
+          <div className="metric-label">Footprint Feed</div>
+          <div className="metric-value" style={{ fontSize: 16, color: diag.footprintConnected ? 'var(--green)' : 'var(--red)' }}>
+            {diag.footprintConnected ? `live (${ageSec(diag.lastFootprintBarAt)}s)` : 'disconnected'}
+          </div>
+        </div>
+        <div className="metric">
+          <div className="metric-label">Depth Feed</div>
+          <div className="metric-value" style={{ fontSize: 16, color: diag.depthConnected ? 'var(--green)' : 'var(--red)' }}>
+            {diag.depthConnected ? `live (${ageSec(diag.lastDepthEventAt)}s)` : 'disconnected'}
+          </div>
+        </div>
+        <div className="metric">
+          <div className="metric-label">Session POC</div>
+          <div className="metric-value" style={{ fontSize: 16 }}>
+            {diag.poc != null ? r(diag.poc, 1) : `forming... (${diag.sessionBarsCount ?? 0}/${MIN_SESSION_BARS} bars)`}
+          </div>
+        </div>
+        <div className="metric">
+          <div className="metric-label">Value Area (VAH / VAL)</div>
+          <div className="metric-value" style={{ fontSize: 16 }}>
+            {diag.valueArea ? `${r(diag.valueArea.high, 1)} / ${r(diag.valueArea.low, 1)}` : 'forming...'}
+          </div>
+        </div>
+      </div>
+
+      <div className="two-col">
+        <div className="card">
+          <p className="card-title">
+            Active Footprint Zones ({diag.activeZones?.length ?? 0})
+            {diag.baseRegime && (
+              <span style={{ marginLeft: 8, fontSize: 9, letterSpacing: 0, textTransform: 'none', color: diag.baseRegime === 'NEG_GAMMA' ? 'var(--green)' : 'var(--text3)' }}>
+                {diag.baseRegime === 'NEG_GAMMA'
+                  ? '— in use today (trend day)'
+                  : '— not in use today (mean-reversion day, value area active instead)'}
+              </span>
+            )}
+          </p>
+          <ZoneList zones={diag.activeZones} cooldownKeys={diag.zoneCooldowns || []} />
+        </div>
+
+        <div className="card">
+          <p className="card-title">Level 2 Depth</p>
+          <DepthHeatmapList zones={diag.topDepthZones} />
+          <div style={{ height: 10 }} />
+          <LargeOrdersList orders={diag.largeRestingOrders} />
+        </div>
       </div>
 
       <div className="card">
@@ -157,7 +212,7 @@ export default function PracticeMode() {
             <table>
               <thead>
                 <tr>
-                  <th>Time</th><th>Dir</th><th>Regime</th><th>Flow</th>
+                  <th>Time</th><th>Dir</th><th>Regime</th><th>Trigger</th>
                   <th>Entry</th><th>Stop</th><th>Target</th><th>Result</th>
                 </tr>
               </thead>
@@ -167,7 +222,7 @@ export default function PracticeMode() {
                     <td style={{ fontFamily: 'var(--mono)', fontSize: 11 }}>{fmtTime(row.ts)}</td>
                     <td>{row.direction && <span className={row.direction === 'long' ? 'tag-long' : 'tag-short'}>{row.direction}</span>}</td>
                     <td style={{ fontFamily: 'var(--mono)', fontSize: 10, color: 'var(--text3)' }}>{row.regime ?? '—'}</td>
-                    <td style={{ fontFamily: 'var(--mono)', fontSize: 11 }}>{row.flow_grade ?? '—'}</td>
+                    <td style={{ fontFamily: 'var(--mono)', fontSize: 10, color: 'var(--text3)' }}>{row.level_type ?? '—'}</td>
                     <td style={{ fontFamily: 'var(--mono)', fontSize: 11 }}>{r(row.entry_price)}</td>
                     <td style={{ fontFamily: 'var(--mono)', fontSize: 11, color: 'var(--red)' }}>{r(row.stop_price)}</td>
                     <td style={{ fontFamily: 'var(--mono)', fontSize: 11, color: 'var(--green)' }}>{r(row.target_price)}</td>
@@ -219,6 +274,64 @@ export default function PracticeMode() {
           </div>
         )}
       </div>
+    </div>
+  );
+}
+
+function ZoneList({ zones, cooldownKeys }) {
+  if (!zones || zones.length === 0) {
+    return <div className="empty">No stacked footprint zones right now.</div>;
+  }
+  return zones.map((z, i) => {
+    // Matches gex-breakout's orderFlowBot.js zoneKeyFor exactly — a display-
+    // only replication of that string format, not an imported function.
+    const key = `${z.side}:${z.low.toFixed(2)}-${z.high.toFixed(2)}`;
+    const cooling = (cooldownKeys || []).includes(key);
+    return (
+      <div key={i} style={{ display: 'flex', justifyContent: 'space-between', padding: '3px 0', opacity: cooling ? 0.5 : 1 }}>
+        <span className={z.side === 'buy' ? 'tag-long' : 'tag-short'} style={{ fontSize: 11 }}>{z.side}</span>
+        <span style={{ fontFamily: 'var(--mono)', fontSize: 11 }}>{r(z.low)} – {r(z.high)}</span>
+        <span style={{ fontFamily: 'var(--mono)', fontSize: 10, color: 'var(--text3)' }}>
+          {r(z.buyVolume, 0)}buy / {r(z.sellVolume, 0)}sell{cooling ? ' · cooling' : ''}
+        </span>
+      </div>
+    );
+  });
+}
+
+function DepthHeatmapList({ zones }) {
+  return (
+    <div>
+      <div style={{ color: 'var(--text3)', fontFamily: 'var(--mono)', fontSize: 10, letterSpacing: 1, marginBottom: 6 }}>HEATMAP — TOP ZONES</div>
+      {!zones || zones.length === 0 ? (
+        <div style={{ color: 'var(--text3)', fontFamily: 'var(--mono)', fontSize: 11 }}>none</div>
+      ) : (
+        zones.map((z, i) => (
+          <div key={i} style={{ display: 'flex', justifyContent: 'space-between', padding: '3px 0' }}>
+            <span style={{ fontFamily: 'var(--mono)', fontSize: 11 }}>{r(z.price)}</span>
+            <span style={{ fontFamily: 'var(--mono)', fontSize: 10, color: 'var(--text3)' }}>{r(z.weight, 0)}</span>
+          </div>
+        ))
+      )}
+    </div>
+  );
+}
+
+function LargeOrdersList({ orders }) {
+  return (
+    <div>
+      <div style={{ color: 'var(--text3)', fontFamily: 'var(--mono)', fontSize: 10, letterSpacing: 1, marginBottom: 6 }}>LARGE RESTING ORDERS</div>
+      {!orders || orders.length === 0 ? (
+        <div style={{ color: 'var(--text3)', fontFamily: 'var(--mono)', fontSize: 11 }}>none</div>
+      ) : (
+        orders.map((o, i) => (
+          <div key={i} style={{ display: 'flex', justifyContent: 'space-between', padding: '3px 0' }}>
+            <span className={o.side === 'bid' ? 'tag-long' : 'tag-short'} style={{ fontSize: 11 }}>{o.side}</span>
+            <span style={{ fontFamily: 'var(--mono)', fontSize: 11 }}>{r(o.price)}</span>
+            <span style={{ fontFamily: 'var(--mono)', fontSize: 10, color: 'var(--text3)' }}>{o.size}</span>
+          </div>
+        ))
+      )}
     </div>
   );
 }

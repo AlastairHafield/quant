@@ -54,10 +54,11 @@ export function buildStatusPayload(worker) {
       openPositions: worker.openPositionsA,
     },
     recentLog: worker.logger.buffer.slice(-50).reverse(),
-    // Order Flow Bot Phase 3 diagnostics — footprint/depth aren't wired into
-    // any signal logic yet (Phase 4), this just proves the plumbing is
-    // connected and visible. activeZones/topDepthZones are computed fresh
-    // each push rather than cached on the worker, same as regime/levels.
+    // Order Flow Bot diagnostics — footprint/depth plumbing (Phase 3) plus
+    // the session value area (Phase 4, promoted to instance fields
+    // specifically so the dashboard can show them — see tryOrderFlow).
+    // activeZones/topDepthZones are computed fresh each push rather than
+    // cached on the worker, same as regime/levels.
     orderFlowDiagnostics: {
       footprintConnected: recentlyEventedWithin(worker.lastFootprintBarAt, CONFIG.barStaleThresholdMin),
       lastFootprintBarAt: worker.lastFootprintBarAt ? worker.lastFootprintBarAt.toISOString() : null,
@@ -69,6 +70,12 @@ export function buildStatusPayload(worker) {
         ? detectLargeRestingOrders(worker.depthBook.lastSnapshot, CONFIG.orderFlowBot.depth)
         : [],
       zoneCooldowns: [...worker.riskManager.zoneCooldowns.keys()],
+      // baseRegime, not regime — regime can read "NEAR_FLIP" and mask which
+      // zone set orderFlowBot.js's buildActiveZones actually picked today.
+      baseRegime: worker.lastRegimeInfo?.baseRegime ?? null,
+      poc: worker.lastPOC,
+      valueArea: worker.lastValueArea,
+      sessionBarsCount: worker.bars.length - worker.todaySessionStartIndex,
     },
     updatedAt: new Date().toISOString(),
   };

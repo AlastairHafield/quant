@@ -4,7 +4,7 @@ import React from 'react';
 // live from each bot (only GEX Breakout pushes a status payload the frontend
 // can read; Mechanical ORB and Gap Continuation don't currently expose their
 // config over the wire). Update this whenever a bot's config.js changes.
-const AS_OF = '2026-07-29';
+const AS_OF = '2026-07-30';
 
 const STRATEGIES = [
   {
@@ -15,9 +15,9 @@ const STRATEGIES = [
     instrument: 'MES',
     timeframe: 'Regime-adaptive — GEX bias picks trend-following vs. mean-reversion each day, no fixed window',
     entryWindow: 'No new entries after 12:00 ET · force-flat 15:55 ET',
-    entry: 'In development (Phase 1 of the rebuild): volume profile, footprint, and Level 2 depth zones/triggers are not wired in yet — the strategy slot currently emits no signals',
-    stopTarget: 'Trend days: trail behind zones/delta levels, no fixed target · Mean-reversion days: fixed target at the contrarian zone — not yet implemented',
-    sizing: 'Base 4 contracts × wall-proximity multiplier — flat (ladder not applied on practice account)',
+    entry: 'Regime picks the active zone set — footprint stacked buy/sell-imbalance zones on NEG_GAMMA (trend) days, session value area on POS_GAMMA (mean-reversion) days. 3 shared triggers evaluated against it: absorption at the zone edge, path-of-least-resistance (light-volume clean advance), lack-of-participation (declining volume + flattening delta) — plus failed-auction (POS_GAMMA-only, value-area probe-and-revert). Wall-proximity filter applies once a trigger fires. Signal-only (STRATEGY_OF_EXECUTION_ENABLED=false) — observing real signals/vetoes before enabling live orders',
+    stopTarget: 'Stop sits 1pt beyond the zone edge traded, capped at 12pt total risk · trend days trail behind the nearest zone instead of a fixed target · mean-reversion days target the opposite value-area edge',
+    sizing: 'Base 2 contracts (fixed synthetic grade — no confirmation-strength grading like Strategy B\'s flow grade yet) × wall-proximity multiplier — flat (ladder not applied on practice account)',
     riskLimits: 'Max 3 trades/day, 60-min cooldown per zone, max 2 losses/day or 1 win halts the strategy for the day',
     execEnvVar: 'STRATEGY_OF_EXECUTION_ENABLED',
   },

@@ -323,6 +323,42 @@ test("Worker end-to-end: tryOrderFlow fires a real lack-of-participation signal 
   assert.equal(worker.riskManager.dayState.zoneCooldowns.has("buy:5498.00-5500.00"), true);
 });
 
+test("tryOrderFlow: promotes POC/value area to instance fields once minSessionBars is cleared", () => {
+  const worker = createWorker();
+  // Matches real CONFIG.orderFlowBot.volumeProfile.minSessionBars (30) —
+  // flat range so POC/value area are trivially non-null, exact values aren't
+  // the point here (volumeProfile.test.js already covers the math).
+  for (let i = 0; i < 30; i++) {
+    worker.bars.push({ high: 5501, low: 5499, close: 5500, buyVolume: 10, sellVolume: 10, cumDelta: 0 });
+  }
+  worker.todaySessionStartIndex = 0;
+  const lastIdx = worker.bars.length - 1;
+  worker.tryOrderFlow(
+    worker.bars[lastIdx],
+    worker.bars[lastIdx - 1],
+    lastIdx,
+    new Date(2026, 6, 24, 10, 0),
+    { baseRegime: "NEG_GAMMA", regime: "NEG_GAMMA" }
+  );
+
+  assert.notEqual(worker.lastPOC, null);
+  assert.notEqual(worker.lastValueArea, null);
+  assert.ok(worker.sessionVolumeProfile.length > 0);
+});
+
+test("tryOrderFlow: leaves POC/value area null while the session is still thin", () => {
+  const worker = createWorker();
+  worker.bars.push({ high: 5501, low: 5499, close: 5500, buyVolume: 10, sellVolume: 10, cumDelta: 0 });
+  worker.todaySessionStartIndex = 0;
+  worker.tryOrderFlow(worker.bars[0], worker.bars[0], 0, new Date(2026, 6, 24, 10, 0), {
+    baseRegime: "NEG_GAMMA",
+    regime: "NEG_GAMMA",
+  });
+
+  assert.equal(worker.lastPOC, null);
+  assert.equal(worker.lastValueArea, null);
+});
+
 test("evaluateSignals: does not evaluate before sessionOpenET (pre-market)", () => {
   const worker = createWorker();
   worker.gexSnapshot = { netGex: -5e9, flipPoint: 5400, walls: { aboveSpot: [], belowSpot: [] } };

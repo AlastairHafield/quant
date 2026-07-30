@@ -35,6 +35,26 @@ test("buildStatusPayload: sane defaults before any data has arrived", () => {
   assert.deepEqual(payload.orderFlowDiagnostics.topDepthZones, []);
   assert.deepEqual(payload.orderFlowDiagnostics.largeRestingOrders, []);
   assert.deepEqual(payload.orderFlowDiagnostics.zoneCooldowns, []);
+  assert.equal(payload.orderFlowDiagnostics.baseRegime, null);
+  assert.equal(payload.orderFlowDiagnostics.poc, null);
+  assert.equal(payload.orderFlowDiagnostics.valueArea, null);
+  assert.equal(payload.orderFlowDiagnostics.sessionBarsCount, 0);
+});
+
+test("buildStatusPayload: orderFlowDiagnostics reports baseRegime (not the NEAR_FLIP-masked regime) and the session value area", () => {
+  const worker = createWorker();
+  worker.lastRegimeInfo = { baseRegime: "POS_GAMMA", regime: "NEAR_FLIP", nearFlip: true };
+  worker.lastPOC = 5500;
+  worker.lastValueArea = { high: 5510, low: 5490, volume: 1000 };
+  worker.bars.push({ close: 5500 }, { close: 5501 });
+  worker.todaySessionStartIndex = 1;
+
+  const payload = buildStatusPayload(worker);
+  assert.equal(payload.regime, "NEAR_FLIP"); // the top-level field stays as-is
+  assert.equal(payload.orderFlowDiagnostics.baseRegime, "POS_GAMMA"); // the true base regime, unmasked
+  assert.equal(payload.orderFlowDiagnostics.poc, 5500);
+  assert.deepEqual(payload.orderFlowDiagnostics.valueArea, { high: 5510, low: 5490, volume: 1000 });
+  assert.equal(payload.orderFlowDiagnostics.sessionBarsCount, 1); // 2 bars total, session started at index 1
 });
 
 test("buildStatusPayload: orderFlowDiagnostics reports connectivity and real depth data once events arrive", () => {

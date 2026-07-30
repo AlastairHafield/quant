@@ -218,6 +218,8 @@ export class Worker {
     this.depthBook = new depthBook.DepthBookAggregator(CONFIG.orderFlowBot.depth);
     this.lastFootprintZones = null; // recomputed each bar in tryOrderFlow, cached for visibility
     this.sessionVolumeProfile = null; // ditto
+    this.lastPOC = null; // ditto — null until sessionBars clears minSessionBars
+    this.lastValueArea = null; // ditto
     // Index into this.bars where TODAY's bars start — this.bars itself is
     // never trimmed at day rollover (multi-day history is fine for most uses,
     // e.g. MFE/MAE on a trade spanning a restart), but the session volume
@@ -655,14 +657,19 @@ export class Worker {
     this.lastFootprintZones = buildFootprintZones(this.footprintBars, CONFIG.orderFlowBot.footprint);
 
     const sessionBars = this.bars.slice(this.todaySessionStartIndex);
-    let valueArea = null;
-    // Below minSessionBars, a value area is just noise — no zone rather than
-    // an untrustworthy one.
+    // Below minSessionBars, a value area is just noise — no zone (and no
+    // stale POC/value area left over from a moment ago) rather than an
+    // untrustworthy one. lastPOC/lastValueArea are also read by
+    // statusReporter.js for the dashboard's "forming..." state.
     if (sessionBars.length >= CONFIG.orderFlowBot.volumeProfile.minSessionBars) {
       this.sessionVolumeProfile = buildSessionProfile(sessionBars, CONFIG.orderFlowBot.volumeProfile);
-      const poc = findPOC(this.sessionVolumeProfile);
-      valueArea = computeValueArea(this.sessionVolumeProfile, poc, CONFIG.orderFlowBot.volumeProfile.valueAreaPct);
+      this.lastPOC = findPOC(this.sessionVolumeProfile);
+      this.lastValueArea = computeValueArea(this.sessionVolumeProfile, this.lastPOC, CONFIG.orderFlowBot.volumeProfile.valueAreaPct);
+    } else {
+      this.lastPOC = null;
+      this.lastValueArea = null;
     }
+    const valueArea = this.lastValueArea;
 
     const absorptionWindow = buildAbsorptionWindow(this.bars, idx, CONFIG.orderFlow.absorption);
 
