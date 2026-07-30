@@ -145,20 +145,28 @@ export function evaluateBreakoutFlow(bars, breakoutIndex, direction, levelPrice,
 // the direction the tape is already moving, not the opposite. Retrospective
 // over the trailing `lookbackBars` ending at `index`, like this module's
 // other triggers (no forward-looking confirmation bar).
-export function detectPathOfLeastResistance(bars, index, { lookbackBars, volumeLightMultiple, avgLookbackBars }) {
+//
+// describePathOfLeastResistance carries the same logic but always returns a
+// diagnostic object (matched + reason + the raw numbers behind the decision)
+// instead of collapsing every non-match into a bare null — built for the
+// Order Flow Bot's no-trigger heartbeat (see worker.js), which needs to show
+// WHY nothing fired, not just that nothing did. detectPathOfLeastResistance
+// is a thin wrapper so every existing caller/test keeps its original
+// null-or-{direction} contract unchanged.
+export function describePathOfLeastResistance(bars, index, { lookbackBars, volumeLightMultiple, avgLookbackBars }) {
   const start = Math.max(0, index - lookbackBars + 1);
   const window = bars.slice(start, index + 1);
-  if (window.length < lookbackBars) return null;
+  if (window.length < lookbackBars) return { matched: false, reason: "insufficient_bars" };
 
   const netMove = window[window.length - 1].close - window[0].close;
-  if (netMove === 0) return null;
+  if (netMove === 0) return { matched: false, reason: "no_net_move" };
   const direction = netMove > 0 ? "long" : "short";
 
   const cleanProgress = window.every((b, i) => {
     if (i === 0) return true;
     return direction === "long" ? b.close >= window[i - 1].close : b.close <= window[i - 1].close;
   });
-  if (!cleanProgress) return null;
+  if (!cleanProgress) return { matched: false, reason: "choppy", direction, netMove };
 
   const barVolume = (b) => (b.volume ?? (b.buyVolume ?? 0) + (b.sellVolume ?? 0));
   const windowVolume = window.reduce((s, b) => s + barVolume(b), 0);
@@ -166,15 +174,20 @@ export function detectPathOfLeastResistance(bars, index, { lookbackBars, volumeL
   const avgBarVolume = avgWindow.length ? avgWindow.reduce((s, b) => s + barVolume(b), 0) / avgWindow.length : 0;
   const expectedVolume = avgBarVolume * window.length;
   const lightVolume = expectedVolume > 0 && windowVolume < expectedVolume / volumeLightMultiple;
-  if (!lightVolume) return null;
+  if (!lightVolume) return { matched: false, reason: "volume_not_light", direction, netMove, windowVolume, expectedVolume };
 
   const deltaAgrees =
     direction === "long"
       ? window[window.length - 1].cumDelta > window[0].cumDelta
       : window[window.length - 1].cumDelta < window[0].cumDelta;
-  if (!deltaAgrees) return null;
+  if (!deltaAgrees) return { matched: false, reason: "delta_disagrees", direction, netMove, windowVolume, expectedVolume };
 
-  return { direction };
+  return { matched: true, direction, netMove, windowVolume, expectedVolume };
+}
+
+export function detectPathOfLeastResistance(bars, index, cfg) {
+  const d = describePathOfLeastResistance(bars, index, cfg);
+  return d.matched ? { direction: d.direction } : null;
 }
 
 // Exhaustion signal: volume DECLINING across the trailing window (interest
@@ -183,10 +196,15 @@ export function detectPathOfLeastResistance(bars, index, { lookbackBars, volumeL
 // the prior move — matching this trigger's role as a mean-reversion signal,
 // unlike path-of-least-resistance above. Retrospective, same convention as
 // this module's other triggers.
-export function detectLackOfParticipation(bars, index, { lookbackBars, volumeDeclineMultiple }) {
+//
+// describeLackOfParticipation mirrors describePathOfLeastResistance above:
+// same logic, always returns a diagnostic object instead of a bare null.
+// detectLackOfParticipation wraps it so its existing callers/tests are
+// unaffected.
+export function describeLackOfParticipation(bars, index, { lookbackBars, volumeDeclineMultiple }) {
   const start = Math.max(0, index - lookbackBars + 1);
   const window = bars.slice(start, index + 1);
-  if (window.length < lookbackBars || window.length < 2) return null;
+  if (window.length < lookbackBars || window.length < 2) return { matched: false, reason: "insufficient_bars" };
 
   const half = Math.floor(window.length / 2);
   const firstHalf = window.slice(0, half);
@@ -195,15 +213,31 @@ export function detectLackOfParticipation(bars, index, { lookbackBars, volumeDec
   const vol = (w) => w.reduce((s, b) => s + barVolume(b), 0);
   const firstVol = vol(firstHalf);
   const secondVol = vol(secondHalf);
-  if (!(firstVol > 0 && secondVol < firstVol / volumeDeclineMultiple)) return null;
+  if (!(firstVol > 0 && secondVol < firstVol / volumeDeclineMultiple)) {
+    return { matched: false, reason: "volume_not_declining", firstVol, secondVol };
+  }
 
   const firstDeltaSlope = firstHalf[firstHalf.length - 1].cumDelta - firstHalf[0].cumDelta;
   const secondDeltaSlope = secondHalf[secondHalf.length - 1].cumDelta - secondHalf[0].cumDelta;
-  if (firstDeltaSlope === 0) return null;
+  if (firstDeltaSlope === 0) return { matched: false, reason: "no_prior_delta_slope", firstVol, secondVol };
   const priorDirection = firstDeltaSlope > 0 ? "long" : "short";
   const flattenedOrReversed =
     priorDirection === "long" ? secondDeltaSlope < firstDeltaSlope : secondDeltaSlope > firstDeltaSlope;
-  if (!flattenedOrReversed) return null;
+  if (!flattenedOrReversed) {
+    return { matched: false, reason: "delta_not_flattening", firstVol, secondVol, firstDeltaSlope, secondDeltaSlope };
+  }
 
-  return { direction: priorDirection === "long" ? "short" : "long" };
+  return {
+    matched: true,
+    direction: priorDirection === "long" ? "short" : "long",
+    firstVol,
+    secondVol,
+    firstDeltaSlope,
+    secondDeltaSlope,
+  };
+}
+
+export function detectLackOfParticipation(bars, index, cfg) {
+  const d = describeLackOfParticipation(bars, index, cfg);
+  return d.matched ? { direction: d.direction } : null;
 }

@@ -102,6 +102,14 @@ export const CONFIG = {
     macroOverrideEnabled: process.env.ORDER_FLOW_MACRO_ON !== "false",
     maxTradesPerDay: 3,
     cooldownMinPerZone: 60,
+    // How often to log a diagnostic snapshot (why POLR/LOP didn't fire, plus
+    // regime/zone/POC state) when a bar produces zero trigger at all — the
+    // Order Flow Bot's own version of Strategy B's skip-visibility logging,
+    // added 2026-07-30 after a full live session produced zero OF rows (real
+    // or veto) with no way to tell "no trigger fired" from "something's
+    // silently broken." Not per-bar (would flood the dashboard's recentLog
+    // and bury real signals) — sampled on this interval instead.
+    diagnosticHeartbeatMin: 15,
     volumeProfile: {
       bucketSizePts: 1,
       valueAreaPct: 0.7,

@@ -10,7 +10,12 @@ import {
   consolidationLevels,
   isInOpenSpace,
 } from "./levelEngine.js";
-import { evaluateBreakoutFlow, buildAbsorptionWindow } from "./orderFlow.js";
+import {
+  evaluateBreakoutFlow,
+  buildAbsorptionWindow,
+  describePathOfLeastResistance,
+  describeLackOfParticipation,
+} from "./orderFlow.js";
 import {
   checkBreakoutTrigger,
   checkProximity,
@@ -220,6 +225,7 @@ export class Worker {
     this.sessionVolumeProfile = null; // ditto
     this.lastPOC = null; // ditto — null until sessionBars clears minSessionBars
     this.lastValueArea = null; // ditto
+    this.lastOFHeartbeatAt = null; // real wall-clock ms — throttles logOrderFlowHeartbeat, see tryOrderFlow
     // Index into this.bars where TODAY's bars start — this.bars itself is
     // never trimmed at day rollover (multi-day history is fine for most uses,
     // e.g. MFE/MAE on a trade spanning a restart), but the session volume
@@ -531,6 +537,7 @@ export class Worker {
     // exactly "every bar from prior days," so today's bars start right here.
     this.todaySessionStartIndex = this.bars.length;
     this.footprintBars = [];
+    this.lastOFHeartbeatAt = null;
   }
 
   onBar(rawBar, t = nowET()) {
@@ -702,7 +709,49 @@ export class Worker {
       // deserve more size. Revisit once Phase 6's manual signal review has
       // real trades to judge against.
       this.handleSignal(result, regimeInfo, { grade: "B" });
+    } else {
+      // evaluateOrderFlowBot returned a bare null — genuinely no trigger at
+      // all this bar (its own explicit vetoes, e.g. wall/stop/cutoff, always
+      // return a truthy object and hit handleSignal above, so this is the
+      // one path that used to leave zero trace).
+      this.logOrderFlowHeartbeat(idx, regimeInfo, valueArea);
     }
+  }
+
+  // Order Flow Bot's version of logStrategyBSkip below: makes an otherwise
+  // silent "no trigger fired" bar visible, throttled to
+  // diagnosticHeartbeatMin so it samples state rather than logging every bar
+  // (POLR/LOP run unconditionally every bar, unlike Strategy B's rarer level
+  // crossings — logging every miss would flood recentLog and bury real
+  // signals). See config.js's diagnosticHeartbeatMin comment for why this
+  // exists at all.
+  logOrderFlowHeartbeat(idx, regimeInfo, valueArea) {
+    const nowMs = Date.now();
+    const intervalMs = CONFIG.orderFlowBot.diagnosticHeartbeatMin * 60000;
+    if (this.lastOFHeartbeatAt && nowMs - this.lastOFHeartbeatAt < intervalMs) return;
+    this.lastOFHeartbeatAt = nowMs;
+
+    const polr = describePathOfLeastResistance(this.bars, idx, CONFIG.orderFlowBot.pathOfLeastResistance);
+    const lop = describeLackOfParticipation(this.bars, idx, CONFIG.orderFlowBot.lackOfParticipation);
+
+    this.persistLogRow(
+      buildLogRow({
+        ts: new Date().toISOString(),
+        strategy: "OF",
+        regime: regimeInfo?.regime ?? null,
+        netGex: this.gexSnapshot?.netGex ?? null,
+        flipPoint: this.levelState.flipPointEs,
+        vetoReason: "no_trigger_heartbeat",
+        deltaStats: {
+          baseRegime: regimeInfo?.baseRegime ?? null,
+          zoneCount: this.lastFootprintZones?.length ?? 0,
+          poc: this.lastPOC,
+          valueArea,
+          polr,
+          lop,
+        },
+      })
+    );
   }
 
   tryStrategyB(bar, prevBar, idx, t, regimeInfo) {

@@ -11,6 +11,8 @@ import {
   evaluateBreakoutFlow,
   detectPathOfLeastResistance,
   detectLackOfParticipation,
+  describePathOfLeastResistance,
+  describeLackOfParticipation,
 } from "../src/orderFlow.js";
 
 test("computeDelta is buy-aggressor minus sell-aggressor volume", () => {
@@ -388,4 +390,131 @@ test("detectLackOfParticipation: no signal with an ambiguous (flat) first-half d
 test("detectLackOfParticipation: not enough bars yet", () => {
   const bars = [{ buyVolume: 20, sellVolume: 5, cumDelta: 0 }];
   assert.equal(detectLackOfParticipation(bars, 0, lopCfg), null);
+});
+
+// describePathOfLeastResistance/describeLackOfParticipation back the Order
+// Flow Bot's no-trigger heartbeat (worker.js) — same logic as the detect*
+// functions above (reusing their exact fixtures), but always returns a
+// reason instead of collapsing every non-match into null.
+
+test("describePathOfLeastResistance: matched — same shape the real trigger uses, plus the raw numbers", () => {
+  const bars = [
+    { close: 90, buyVolume: 10, sellVolume: 10, cumDelta: 0 },
+    { close: 90, buyVolume: 10, sellVolume: 10, cumDelta: 0 },
+    { close: 90, buyVolume: 10, sellVolume: 10, cumDelta: 0 },
+    { close: 100, buyVolume: 5, sellVolume: 1, cumDelta: 10 },
+    { close: 101, buyVolume: 5, sellVolume: 1, cumDelta: 14 },
+    { close: 102, buyVolume: 5, sellVolume: 1, cumDelta: 18 },
+    { close: 103, buyVolume: 5, sellVolume: 1, cumDelta: 22 },
+  ];
+  const d = describePathOfLeastResistance(bars, 6, polrCfg);
+  assert.equal(d.matched, true);
+  assert.equal(d.direction, "long");
+  assert.equal(d.netMove, 3); // window is the last 4 bars (lookbackBars): 103 - 100
+});
+
+test("describePathOfLeastResistance: reason is choppy when a dip breaks clean progress", () => {
+  const bars = [
+    { close: 90, buyVolume: 10, sellVolume: 10, cumDelta: 0 },
+    { close: 90, buyVolume: 10, sellVolume: 10, cumDelta: 0 },
+    { close: 90, buyVolume: 10, sellVolume: 10, cumDelta: 0 },
+    { close: 100, buyVolume: 5, sellVolume: 1, cumDelta: 10 },
+    { close: 99, buyVolume: 5, sellVolume: 1, cumDelta: 8 },
+    { close: 102, buyVolume: 5, sellVolume: 1, cumDelta: 18 },
+    { close: 103, buyVolume: 5, sellVolume: 1, cumDelta: 22 },
+  ];
+  assert.equal(describePathOfLeastResistance(bars, 6, polrCfg).reason, "choppy");
+});
+
+test("describePathOfLeastResistance: reason is volume_not_light when volume is heavy", () => {
+  const bars = [
+    { close: 90, buyVolume: 10, sellVolume: 10, cumDelta: 0 },
+    { close: 90, buyVolume: 10, sellVolume: 10, cumDelta: 0 },
+    { close: 90, buyVolume: 10, sellVolume: 10, cumDelta: 0 },
+    { close: 100, buyVolume: 20, sellVolume: 20, cumDelta: 10 },
+    { close: 101, buyVolume: 20, sellVolume: 20, cumDelta: 14 },
+    { close: 102, buyVolume: 20, sellVolume: 20, cumDelta: 18 },
+    { close: 103, buyVolume: 20, sellVolume: 20, cumDelta: 22 },
+  ];
+  assert.equal(describePathOfLeastResistance(bars, 6, polrCfg).reason, "volume_not_light");
+});
+
+test("describePathOfLeastResistance: reason is delta_disagrees when cumDelta contradicts price", () => {
+  const bars = [
+    { close: 90, buyVolume: 10, sellVolume: 10, cumDelta: 0 },
+    { close: 90, buyVolume: 10, sellVolume: 10, cumDelta: 0 },
+    { close: 90, buyVolume: 10, sellVolume: 10, cumDelta: 0 },
+    { close: 100, buyVolume: 5, sellVolume: 1, cumDelta: 20 },
+    { close: 101, buyVolume: 5, sellVolume: 1, cumDelta: 18 },
+    { close: 102, buyVolume: 5, sellVolume: 1, cumDelta: 16 },
+    { close: 103, buyVolume: 5, sellVolume: 1, cumDelta: 14 },
+  ];
+  assert.equal(describePathOfLeastResistance(bars, 6, polrCfg).reason, "delta_disagrees");
+});
+
+test("describePathOfLeastResistance: reason is no_net_move when the window opens and closes flat", () => {
+  const bars = [
+    { close: 100, buyVolume: 5, sellVolume: 5, cumDelta: 0 },
+    { close: 101, buyVolume: 5, sellVolume: 5, cumDelta: 2 },
+    { close: 99, buyVolume: 5, sellVolume: 5, cumDelta: -2 },
+    { close: 100, buyVolume: 5, sellVolume: 5, cumDelta: 0 },
+  ];
+  assert.equal(describePathOfLeastResistance(bars, 3, polrCfg).reason, "no_net_move");
+});
+
+test("describePathOfLeastResistance: reason is insufficient_bars when the window can't fill", () => {
+  const bars = [
+    { close: 100, buyVolume: 5, sellVolume: 1, cumDelta: 10 },
+    { close: 101, buyVolume: 5, sellVolume: 1, cumDelta: 14 },
+  ];
+  assert.equal(describePathOfLeastResistance(bars, 1, polrCfg).reason, "insufficient_bars");
+});
+
+test("describeLackOfParticipation: matched — same shape the real trigger uses, plus the raw numbers", () => {
+  const bars = [
+    { buyVolume: 20, sellVolume: 5, cumDelta: 0 },
+    { buyVolume: 20, sellVolume: 5, cumDelta: 15 },
+    { buyVolume: 5, sellVolume: 5, cumDelta: 20 },
+    { buyVolume: 5, sellVolume: 5, cumDelta: 22 },
+  ];
+  const d = describeLackOfParticipation(bars, 3, lopCfg);
+  assert.equal(d.matched, true);
+  assert.equal(d.direction, "short");
+  assert.equal(d.firstVol, 50); // first half: (20+5) + (20+5)
+  assert.equal(d.secondVol, 20); // second half: (5+5) + (5+5)
+});
+
+test("describeLackOfParticipation: reason is volume_not_declining", () => {
+  const bars = [
+    { buyVolume: 20, sellVolume: 5, cumDelta: 0 },
+    { buyVolume: 20, sellVolume: 5, cumDelta: 15 },
+    { buyVolume: 15, sellVolume: 15, cumDelta: 20 },
+    { buyVolume: 15, sellVolume: 15, cumDelta: 22 },
+  ];
+  assert.equal(describeLackOfParticipation(bars, 3, lopCfg).reason, "volume_not_declining");
+});
+
+test("describeLackOfParticipation: reason is delta_not_flattening", () => {
+  const bars = [
+    { buyVolume: 20, sellVolume: 5, cumDelta: 0 },
+    { buyVolume: 20, sellVolume: 5, cumDelta: 15 },
+    { buyVolume: 5, sellVolume: 5, cumDelta: 25 },
+    { buyVolume: 5, sellVolume: 5, cumDelta: 40 },
+  ];
+  assert.equal(describeLackOfParticipation(bars, 3, lopCfg).reason, "delta_not_flattening");
+});
+
+test("describeLackOfParticipation: reason is no_prior_delta_slope", () => {
+  const bars = [
+    { buyVolume: 20, sellVolume: 5, cumDelta: 10 },
+    { buyVolume: 20, sellVolume: 5, cumDelta: 10 },
+    { buyVolume: 5, sellVolume: 5, cumDelta: 12 },
+    { buyVolume: 5, sellVolume: 5, cumDelta: 14 },
+  ];
+  assert.equal(describeLackOfParticipation(bars, 3, lopCfg).reason, "no_prior_delta_slope");
+});
+
+test("describeLackOfParticipation: reason is insufficient_bars", () => {
+  const bars = [{ buyVolume: 20, sellVolume: 5, cumDelta: 0 }];
+  assert.equal(describeLackOfParticipation(bars, 0, lopCfg).reason, "insufficient_bars");
 });

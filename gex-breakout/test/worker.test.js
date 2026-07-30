@@ -267,20 +267,28 @@ test("handleSignal: Strategy B is unaffected by the Order Flow Bot's own practic
 
 test("Worker end-to-end: a strategy's own loss/win halt stops further trading for the day", () => {
   const worker = createWorker();
+  worker.gexSnapshot = { netGex: -5e9, flipPoint: 5400, walls: { aboveSpot: [], belowSpot: [] } };
+  worker.basis = 0;
+  worker.rebuildLevels();
+
+  // Settle currentDay first — checkDayRollover (fired on the first onBar of
+  // any fresh worker) resets riskManager.dayState, which would silently undo
+  // the halts recorded below if they were set up before the day was
+  // established.
+  worker.onBar(esBar({ high: 5500, low: 5498, close: 5499, buyVolume: 10, sellVolume: 10 }), new Date(2026, 6, 24, 9, 46));
+
   worker.riskManager.recordTradeResult("OF", -100);
   worker.riskManager.recordTradeResult("OF", -50); // OF halted: 2 losses
   worker.riskManager.recordTradeResult("B", 25); // B halted: 1 winner
   assert.equal(worker.riskManager.canTrade("OF"), false);
   assert.equal(worker.riskManager.canTrade("B"), false);
 
-  worker.gexSnapshot = { netGex: -5e9, flipPoint: 5400, walls: { aboveSpot: [], belowSpot: [] } };
-  worker.basis = 0;
-  worker.rebuildLevels();
+  const sizeBefore = worker.logger.size;
   worker.onBar(
     esBar({ high: 5523, low: 5520, close: 5522, buyVolume: 300, sellVolume: 50 }),
-    new Date(2026, 6, 24, 9, 46)
+    new Date(2026, 6, 24, 9, 47)
   );
-  assert.equal(worker.logger.size, 0); // both bail out on their own halt before evaluating any real trigger logic
+  assert.equal(worker.logger.size, sizeBefore); // both bail out on their own halt before evaluating any real trigger logic
 });
 
 test("Worker end-to-end: tryOrderFlow fires a real lack-of-participation signal against a live footprint zone", () => {
@@ -313,7 +321,10 @@ test("Worker end-to-end: tryOrderFlow fires a real lack-of-participation signal 
   worker.onBar(esBar({ high: 5500.5, low: 5499.5, close: 5500, buyVolume: 5, sellVolume: 5 }), t(2));
   worker.onBar(esBar({ high: 5500.5, low: 5499.5, close: 5500, buyVolume: 5, sellVolume: 5 }), t(3));
 
-  const row = worker.logger.buffer.find((r) => r.strategy === "OF");
+  // Excludes no_trigger_heartbeat rows — bar t(0) has no footprint zones yet
+  // (onFootprintBar hasn't fired), so it logs a heartbeat before the real
+  // signal arrives on a later bar.
+  const row = worker.logger.buffer.find((r) => r.strategy === "OF" && r.veto_reason == null);
   assert.ok(row, "expected a logged Order Flow Bot signal");
   assert.equal(row.veto_reason, null);
   assert.equal(row.direction, "short");
@@ -322,6 +333,37 @@ test("Worker end-to-end: tryOrderFlow fires a real lack-of-participation signal 
   assert.equal(row.target_price, 5000);
   assert.equal(worker.riskManager.dayState.orderFlowTradesToday, 1);
   assert.equal(worker.riskManager.dayState.zoneCooldowns.has("buy:5498.00-5500.00"), true);
+});
+
+test("tryOrderFlow: logs a no_trigger_heartbeat row once, throttled by diagnosticHeartbeatMin", () => {
+  const worker = createWorker();
+  worker.gexSnapshot = { netGex: -5e9, flipPoint: 5400, walls: { aboveSpot: [], belowSpot: [] } }; // NEG_GAMMA
+  worker.basis = 0;
+  worker.rebuildLevels();
+
+  // Too few bars for absorption/POLR/LOP to ever match (lookbackBars: 4) —
+  // guarantees evaluateOrderFlowBot returns a bare null every time, the
+  // previously-silent path this heartbeat makes visible.
+  worker.onBar(esBar({ high: 5500, low: 5498, close: 5499, buyVolume: 10, sellVolume: 10 }), new Date(2026, 6, 24, 9, 46));
+
+  const heartbeats = () =>
+    worker.logger.buffer.filter((r) => r.strategy === "OF" && r.veto_reason === "no_trigger_heartbeat");
+  assert.equal(heartbeats().length, 1);
+  assert.equal(heartbeats()[0].regime, "NEG_GAMMA");
+  assert.equal(heartbeats()[0].delta_stats.baseRegime, "NEG_GAMMA");
+  assert.equal(heartbeats()[0].delta_stats.polr.matched, false);
+  assert.equal(heartbeats()[0].delta_stats.polr.reason, "insufficient_bars");
+  assert.equal(heartbeats()[0].delta_stats.lop.matched, false);
+
+  // A second bar arriving moments later (same real-world instant, well
+  // inside diagnosticHeartbeatMin) must not log a second heartbeat.
+  worker.onBar(esBar({ high: 5501, low: 5499, close: 5500, buyVolume: 10, sellVolume: 10 }), new Date(2026, 6, 24, 9, 47));
+  assert.equal(heartbeats().length, 1);
+
+  // Simulate the throttle window having elapsed — the next bar logs again.
+  worker.lastOFHeartbeatAt = Date.now() - 16 * 60000;
+  worker.onBar(esBar({ high: 5502, low: 5500, close: 5501, buyVolume: 10, sellVolume: 10 }), new Date(2026, 6, 24, 9, 48));
+  assert.equal(heartbeats().length, 2);
 });
 
 test("tryStrategyB: logs a proximity_not_met skip on a fast crossing, without repeating while it holds", () => {
@@ -374,7 +416,9 @@ test("tryStrategyB: logs a level_on_cooldown skip, taking priority over the prox
 
   worker.onBar(esBar({ high: 5515, low: 5479, close: 5512, buyVolume: 50, sellVolume: 10 }), new Date(2026, 6, 24, 9, 47));
 
-  const skipRows = worker.logger.buffer.filter((r) => r.veto_reason != null);
+  // Scoped to strategy "B" — tryOrderFlow also runs on both these bars and
+  // logs its own no_trigger_heartbeat row (no footprint zones/POC yet).
+  const skipRows = worker.logger.buffer.filter((r) => r.strategy === "B" && r.veto_reason != null);
   assert.equal(skipRows.length, 1);
   assert.equal(skipRows[0].veto_reason, "level_on_cooldown");
 });
