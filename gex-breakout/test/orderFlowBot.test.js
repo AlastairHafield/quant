@@ -6,7 +6,8 @@ import {
   isZoneOnCooldown,
   buildActiveZones,
   computeZoneStop,
-  evaluateOrderFlowZone,
+  evaluateZoneAbsorption,
+  nearestZoneOrSynthetic,
   evaluateOrderFlowBot,
 } from "../src/orderFlowBot.js";
 
@@ -96,7 +97,7 @@ test("computeZoneStop: invalid once total distance exceeds stopCapPts", () => {
   assert.equal(stop.distance, 6);
 });
 
-test("evaluateOrderFlowZone: absorption at the nearest zone edge fires first", () => {
+test("evaluateZoneAbsorption: absorption at the nearest zone edge fires", () => {
   const zone = { side: "buy", low: 5498, high: 5500 };
   const priorBars = Array.from({ length: 20 }, () => ({ volume: 100 }));
   const touchWindow = [
@@ -105,12 +106,15 @@ test("evaluateOrderFlowZone: absorption at the nearest zone edge fires first", (
     { high: 5501, low: 5500, volume: 210 },
   ];
   const bars = [{ close: 5500 }];
-  const result = evaluateOrderFlowZone(zone, { bars, index: 0, touchWindow, priorBars, config });
+  const result = evaluateZoneAbsorption(zone, { bars, index: 0, touchWindow, priorBars, config });
   assert.deepEqual(result, { direction: "short", trigger: "absorption", entryPrice: 5500 });
 });
 
-test("evaluateOrderFlowZone: falls through to path-of-least-resistance when there's no touch window", () => {
+test("evaluateZoneAbsorption: null with no touch window — genuinely zone-specific, no fallthrough to other triggers", () => {
   const zone = { side: "buy", low: 90, high: 95 };
+  // Bars that WOULD trigger path-of-least-resistance if this function still
+  // fell through to it (it no longer does — that's evaluateOrderFlowBot's
+  // job now, checked independent of any zone; see the regression test below).
   const bars = [
     { close: 90, buyVolume: 10, sellVolume: 10, cumDelta: 0 },
     { close: 90, buyVolume: 10, sellVolume: 10, cumDelta: 0 },
@@ -120,30 +124,30 @@ test("evaluateOrderFlowZone: falls through to path-of-least-resistance when ther
     { close: 102, buyVolume: 5, sellVolume: 1, cumDelta: 18 },
     { close: 103, buyVolume: 5, sellVolume: 1, cumDelta: 22 },
   ];
-  const result = evaluateOrderFlowZone(zone, { bars, index: 6, touchWindow: null, priorBars: null, config });
-  assert.deepEqual(result, { direction: "long", trigger: "path_of_least_resistance", entryPrice: 103 });
-});
-
-test("evaluateOrderFlowZone: falls through to lack-of-participation when neither of the above fires", () => {
-  const zone = { side: "buy", low: 90, high: 95 };
-  // Flat close across the window deliberately rules out path-of-least-
-  // resistance (netMove would be 0) without needing to omit a field real
-  // bars always carry.
-  const bars = [
-    { close: 95, buyVolume: 20, sellVolume: 5, cumDelta: 0 },
-    { close: 95, buyVolume: 20, sellVolume: 5, cumDelta: 15 },
-    { close: 95, buyVolume: 5, sellVolume: 5, cumDelta: 20 },
-    { close: 95, buyVolume: 5, sellVolume: 5, cumDelta: 22 },
-  ];
-  const result = evaluateOrderFlowZone(zone, { bars, index: 3, touchWindow: null, priorBars: null, config });
-  assert.deepEqual(result, { direction: "short", trigger: "lack_of_participation", entryPrice: 95 });
-});
-
-test("evaluateOrderFlowZone: null when nothing fires", () => {
-  const zone = { side: "buy", low: 90, high: 95 };
-  const bars = [{ buyVolume: 10, sellVolume: 10, cumDelta: 0 }];
-  const result = evaluateOrderFlowZone(zone, { bars, index: 0, touchWindow: null, priorBars: null, config });
+  const result = evaluateZoneAbsorption(zone, { bars, index: 6, touchWindow: null, priorBars: null, config });
   assert.equal(result, null);
+});
+
+test("evaluateZoneAbsorption: null when the touch window doesn't show absorption either", () => {
+  const zone = { side: "buy", low: 5498, high: 5500 };
+  const priorBars = Array.from({ length: 20 }, () => ({ volume: 100 }));
+  const touchWindow = [{ high: 5500.25, low: 5499.75, volume: 50 }]; // normal volume, no stall
+  const bars = [{ close: 5500 }];
+  const result = evaluateZoneAbsorption(zone, { bars, index: 0, touchWindow, priorBars, config });
+  assert.equal(result, null);
+});
+
+test("nearestZoneOrSynthetic: picks the real zone with the closest midpoint to entryPrice", () => {
+  const zones = [{ low: 90, high: 92 }, { low: 100, high: 102 }, { low: 150, high: 152 }];
+  // midpoints 91/101/151 — entryPrice 103 is closest to 101
+  assert.deepEqual(nearestZoneOrSynthetic(zones, 103, 12, 1), { low: 100, high: 102 });
+});
+
+test("nearestZoneOrSynthetic: synthetic zone half-width is stopCapPts minus triggerBufferPts, not the full stopCapPts", () => {
+  // Sized so computeZoneStop's own triggerBufferPts-beyond-the-edge margin
+  // still totals stopCapPts exactly, not more — a full-stopCapPts-wide
+  // synthetic zone would push every resulting stop past the cap.
+  assert.deepEqual(nearestZoneOrSynthetic([], 5500, 12, 1), { side: null, low: 5489, high: 5511 });
 });
 
 test("evaluateOrderFlowBot: POS_GAMMA failed-auction produces a full contrarian signal", () => {
@@ -216,6 +220,93 @@ test("evaluateOrderFlowBot: NEG_GAMMA absorption on a footprint zone produces a 
     stopPrice: 5501,
     stopDistance: 1,
     targetPrice: 5000,
+    targetMode: "trend_trail_placeholder",
+    sizeMultiplier: 1,
+    isTrendDay: true,
+    regime: "NEG_GAMMA",
+    veto: null,
+  });
+});
+
+// Regression test for the real live gap caught 2026-07-30 (first live
+// session): with zero footprint zones formed yet, path-of-least-resistance
+// used to never even get checked, despite not needing a zone at all.
+test("evaluateOrderFlowBot: path-of-least-resistance fires even with ZERO footprint zones (the exact live bug)", () => {
+  const bars = [
+    { close: 90, buyVolume: 10, sellVolume: 10, cumDelta: 0 },
+    { close: 90, buyVolume: 10, sellVolume: 10, cumDelta: 0 },
+    { close: 90, buyVolume: 10, sellVolume: 10, cumDelta: 0 },
+    { close: 100, buyVolume: 5, sellVolume: 1, cumDelta: 10 },
+    { close: 101, buyVolume: 5, sellVolume: 1, cumDelta: 14 },
+    { close: 102, buyVolume: 5, sellVolume: 1, cumDelta: 18 },
+    { close: 103, buyVolume: 5, sellVolume: 1, cumDelta: 22 },
+  ];
+  const result = evaluateOrderFlowBot({
+    nowET: before,
+    bars,
+    index: 6,
+    regimeInfo: { baseRegime: "NEG_GAMMA", regime: "NEG_GAMMA" },
+    footprintZones: [], // <- the exact live state that silently blocked everything before this fix
+    valueArea: null,
+    touchWindow: null,
+    priorBars: null,
+    walls: noWalls,
+    config,
+    dayState: freshDayState(),
+  });
+  assert.deepEqual(result, {
+    strategy: "OF",
+    direction: "long",
+    trigger: "path_of_least_resistance",
+    zone: { side: null, low: 92, high: 114 }, // synthetic: 103 ± (stopCapPts(12) - triggerBufferPts(1))
+    zoneKey: "VA:92.00-114.00",
+    level: { type: "PATH_OF_LEAST_RESISTANCE", price: 103 },
+    entryPrice: 103,
+    stopPrice: 91,
+    stopDistance: 12,
+    targetPrice: 603,
+    targetMode: "trend_trail_placeholder",
+    sizeMultiplier: 1,
+    isTrendDay: true,
+    regime: "NEG_GAMMA",
+    veto: null,
+  });
+});
+
+test("evaluateOrderFlowBot: path-of-least-resistance attaches to a real nearby zone instead of a synthetic one when one exists", () => {
+  const bars = [
+    { close: 90, buyVolume: 10, sellVolume: 10, cumDelta: 0 },
+    { close: 90, buyVolume: 10, sellVolume: 10, cumDelta: 0 },
+    { close: 90, buyVolume: 10, sellVolume: 10, cumDelta: 0 },
+    { close: 100, buyVolume: 5, sellVolume: 1, cumDelta: 10 },
+    { close: 101, buyVolume: 5, sellVolume: 1, cumDelta: 14 },
+    { close: 102, buyVolume: 5, sellVolume: 1, cumDelta: 18 },
+    { close: 103, buyVolume: 5, sellVolume: 1, cumDelta: 22 },
+  ];
+  const result = evaluateOrderFlowBot({
+    nowET: before,
+    bars,
+    index: 6,
+    regimeInfo: { baseRegime: "NEG_GAMMA", regime: "NEG_GAMMA" },
+    footprintZones: [{ side: "sell", low: 100, high: 104 }], // midpoint 102, nearest to entry 103
+    valueArea: null,
+    touchWindow: null, // no absorption data, so this zone's own absorption check is a no-op
+    priorBars: null,
+    walls: noWalls,
+    config,
+    dayState: freshDayState(),
+  });
+  assert.deepEqual(result, {
+    strategy: "OF",
+    direction: "long",
+    trigger: "path_of_least_resistance",
+    zone: { side: "sell", low: 100, high: 104 },
+    zoneKey: "sell:100.00-104.00",
+    level: { type: "PATH_OF_LEAST_RESISTANCE", price: 103 },
+    entryPrice: 103,
+    stopPrice: 99,
+    stopDistance: 4,
+    targetPrice: 603,
     targetMode: "trend_trail_placeholder",
     sizeMultiplier: 1,
     isTrendDay: true,

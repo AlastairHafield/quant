@@ -739,11 +739,27 @@ export class Worker {
       for (const level of this.levelState.triggerLevelsB) {
         const direction = checkBreakoutTrigger(bar.close, level, CONFIG.strategyB.triggerBufferPts);
         if (!direction) continue;
+
+        // Real live gap caught 2026-07-30: a level crossing that fails
+        // cooldown or proximity was silently skipped — zero log trace, not
+        // even a veto row — indistinguishable from "nothing happened" even
+        // though a real crossing was seen and rejected. checkBreakoutTrigger
+        // keeps returning the same direction for as long as price stays past
+        // the buffer, so only log on the bar price actually TRANSITIONS into
+        // triggering this level+direction — otherwise a fast multi-bar move
+        // past a level would spam one row per bar for as long as it holds.
+        const prevDirection = checkBreakoutTrigger(prevBar.close, level, CONFIG.strategyB.triggerBufferPts);
+        const justCrossed = prevDirection !== direction;
+
         const levelKey = levelKeyFor(level);
         if (isLevelOnCooldown(levelKey, this.riskManager.dayState.levelCooldowns, Date.now(), CONFIG.strategyB.cooldownMinPerLevel)) {
+          if (justCrossed) this.logStrategyBSkip(level, direction, regimeInfo, "level_on_cooldown");
           continue;
         }
-        if (!checkProximity(priorBars, level.price, CONFIG.strategyB.proximity)) continue;
+        if (!checkProximity(priorBars, level.price, CONFIG.strategyB.proximity)) {
+          if (justCrossed) this.logStrategyBSkip(level, direction, regimeInfo, "proximity_not_met");
+          continue;
+        }
 
         this.pendingB = {
           direction,
@@ -763,6 +779,34 @@ export class Worker {
         break;
       }
     }
+  }
+
+  // Both the log buffer (for the dashboard's Recent Signals/Vetoes table)
+  // and Mongo (durable, survives a restart) — same two writes handleSignal
+  // already does, factored out so logStrategyBSkip can reuse it too.
+  persistLogRow(row) {
+    this.logger.log(row);
+    tradeJournal.logSignal(row, nowET().toDateString()).catch((e) => console.error("Mongo log failed:", e.message));
+  }
+
+  // A level crossing Strategy B rejected before ever reaching handleSignal
+  // (cooldown or proximity) — visible now instead of silently indistinguishable
+  // from "nothing happened". Only called on the bar price actually transitions
+  // into triggering (see tryStrategyB), so this doesn't repeat every bar for as
+  // long as a fast move holds past the level.
+  logStrategyBSkip(level, direction, regimeInfo, vetoReason) {
+    this.persistLogRow(
+      buildLogRow({
+        ts: new Date().toISOString(),
+        strategy: "B",
+        direction,
+        level,
+        regime: regimeInfo?.regime ?? null,
+        netGex: this.gexSnapshot?.netGex ?? null,
+        flipPoint: this.levelState.flipPointEs,
+        vetoReason,
+      })
+    );
   }
 
   handleSignal(result, regimeInfo, flow) {
@@ -791,8 +835,7 @@ export class Worker {
       stopPrice: result.stopPrice ?? null,
       targetPrice: result.targetPrice ?? null,
     });
-    this.logger.log(row);
-    tradeJournal.logSignal(row, nowET().toDateString()).catch((e) => console.error("Mongo log failed:", e.message));
+    this.persistLogRow(row);
 
     if (vetoReason) return; // vetoes are logged only, no alert noise
 

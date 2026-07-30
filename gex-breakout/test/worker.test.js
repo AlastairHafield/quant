@@ -15,6 +15,7 @@ import {
   isDepthStreamStale,
 } from "../src/worker.js";
 import { CONFIG } from "../src/config.js";
+import { levelKeyFor } from "../src/strategyB.js";
 
 test("minutesOf converts a Date to minutes-since-midnight", () => {
   assert.equal(minutesOf(new Date(2026, 6, 24, 9, 30)), 570);
@@ -321,6 +322,61 @@ test("Worker end-to-end: tryOrderFlow fires a real lack-of-participation signal 
   assert.equal(row.target_price, 5000);
   assert.equal(worker.riskManager.dayState.orderFlowTradesToday, 1);
   assert.equal(worker.riskManager.dayState.zoneCooldowns.has("buy:5498.00-5500.00"), true);
+});
+
+test("tryStrategyB: logs a proximity_not_met skip on a fast crossing, without repeating while it holds", () => {
+  const worker = createWorker();
+  worker.gexSnapshot = {
+    netGex: -5e9,
+    flipPoint: 5400,
+    walls: { aboveSpot: [{ strike: 5510, gex: -1e9, wallType: "NEG_WALL" }], belowSpot: [] },
+  };
+  worker.basis = 0;
+  worker.rebuildLevels();
+
+  // Bar 1: below the wall, just establishes a prevBar. Only 1 prior bar will
+  // exist for bar 2's own evaluation — checkProximity's own forMinutes(15)
+  // requirement fails on bar count alone, regardless of where price actually
+  // was, which is exactly the "moved too fast to have hovered near the level
+  // long enough" case this is meant to catch.
+  worker.onBar(esBar({ high: 5480, low: 5478, close: 5479, buyVolume: 10, sellVolume: 10 }), new Date(2026, 6, 24, 9, 46));
+  // Bar 2: straight through the wall (5510 + 1pt buffer).
+  worker.onBar(esBar({ high: 5515, low: 5479, close: 5512, buyVolume: 50, sellVolume: 10 }), new Date(2026, 6, 24, 9, 47));
+
+  const skipRows = worker.logger.buffer.filter((r) => r.veto_reason === "proximity_not_met");
+  assert.equal(skipRows.length, 1);
+  assert.equal(skipRows[0].direction, "long");
+  assert.equal(worker.pendingB, null); // never qualified, no pending breakout either
+
+  // Bar 3: still beyond the wall — direction unchanged from bar 2 — must not
+  // log again while the same crossing episode holds.
+  worker.onBar(esBar({ high: 5516, low: 5511, close: 5513, buyVolume: 20, sellVolume: 5 }), new Date(2026, 6, 24, 9, 48));
+  assert.equal(worker.logger.buffer.filter((r) => r.veto_reason === "proximity_not_met").length, 1);
+});
+
+test("tryStrategyB: logs a level_on_cooldown skip, taking priority over the proximity check", () => {
+  const worker = createWorker();
+  worker.gexSnapshot = {
+    netGex: -5e9,
+    flipPoint: 5400,
+    walls: { aboveSpot: [{ strike: 5510, gex: -1e9, wallType: "NEG_WALL" }], belowSpot: [] },
+  };
+  worker.basis = 0;
+  worker.rebuildLevels();
+  const level = worker.levelState.triggerLevelsB.find((l) => l.price === 5510);
+
+  // Seeded AFTER the first onBar, not before — the first onBar of any
+  // session triggers checkDayRollover (currentDay starts null), which wipes
+  // levelCooldowns; in real operation a level only ever gets recorded after
+  // rollover has already happened.
+  worker.onBar(esBar({ high: 5480, low: 5478, close: 5479, buyVolume: 10, sellVolume: 10 }), new Date(2026, 6, 24, 9, 46));
+  worker.riskManager.recordStrategyBTrade(levelKeyFor(level), Date.now()); // this level just traded
+
+  worker.onBar(esBar({ high: 5515, low: 5479, close: 5512, buyVolume: 50, sellVolume: 10 }), new Date(2026, 6, 24, 9, 47));
+
+  const skipRows = worker.logger.buffer.filter((r) => r.veto_reason != null);
+  assert.equal(skipRows.length, 1);
+  assert.equal(skipRows[0].veto_reason, "level_on_cooldown");
 });
 
 test("tryOrderFlow: promotes POC/value area to instance fields once minSessionBars is cleared", () => {

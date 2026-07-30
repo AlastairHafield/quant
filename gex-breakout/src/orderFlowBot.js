@@ -67,32 +67,52 @@ function fadeDirectionFromEdge(zone, edgePrice) {
   return edgePrice === zone.high ? "short" : "long";
 }
 
-// Evaluates the 3 shared, regime-agnostic triggers (absorption, path-of-
-// least-resistance, lack-of-participation — design decision: a shared
-// vocabulary run against whichever zone set the caller already picked for
-// the day) against ONE zone. Path-of-least-resistance/lack-of-participation
-// don't actually reference the zone (they're tape-character detectors over
-// the trailing bars, independent of any level) — checked per-zone anyway so
-// a resulting signal always carries a zone/zoneKey for cooldown tracking.
-export function evaluateOrderFlowZone(zone, ctx) {
+// Absorption at a zone edge — genuinely needs a real zone to test against,
+// unlike path-of-least-resistance/lack-of-participation (see
+// nearestZoneOrSynthetic below), so this stays a per-zone check.
+export function evaluateZoneAbsorption(zone, ctx) {
   const { bars, index, touchWindow, priorBars, config } = ctx;
+  if (!touchWindow || !priorBars) return null;
   const bar = bars[index];
   const edgePrice = nearestZoneEdge(zone, bar.close);
-
-  if (touchWindow && priorBars) {
-    const fadeDirection = fadeDirectionFromEdge(zone, edgePrice);
-    if (detectAbsorption(touchWindow, priorBars, edgePrice, fadeDirection, config.orderFlow.absorption)) {
-      return { direction: fadeDirection, trigger: "absorption", entryPrice: bar.close };
-    }
+  const fadeDirection = fadeDirectionFromEdge(zone, edgePrice);
+  if (detectAbsorption(touchWindow, priorBars, edgePrice, fadeDirection, config.orderFlow.absorption)) {
+    return { direction: fadeDirection, trigger: "absorption", entryPrice: bar.close };
   }
-
-  const polr = detectPathOfLeastResistance(bars, index, config.orderFlowBot.pathOfLeastResistance);
-  if (polr) return { direction: polr.direction, trigger: "path_of_least_resistance", entryPrice: bar.close };
-
-  const lop = detectLackOfParticipation(bars, index, config.orderFlowBot.lackOfParticipation);
-  if (lop) return { direction: lop.direction, trigger: "lack_of_participation", entryPrice: bar.close };
-
   return null;
+}
+
+// The zone nearest entryPrice (by midpoint), or a synthetic point-based one
+// sized off stopCapPts if none exist yet. Path-of-least-resistance/lack-of-
+// participation don't reference a zone at all (pure tape-character reads —
+// detectPathOfLeastResistance/detectLackOfParticipation take no zone
+// parameter), but still need SOME zone shape for stop placement and cooldown
+// tracking, the same as every other Order Flow Bot signal.
+//
+// Real live gap caught 2026-07-30 (first live session): these two triggers
+// used to be evaluated ONLY inside the per-zone loop below, so on a day with
+// zero qualifying footprint zones — which is exactly what the very first
+// live session hit, footprint zones need 3+ consecutive stacked-imbalance
+// buckets to form and simply hadn't yet — neither trigger was ever even
+// checked, despite needing no zone in the first place. User noticed real
+// price action that looked like a clean breakout produced no signal at all.
+//
+// Synthetic half-width is stopCapPts MINUS triggerBufferPts, not the full
+// stopCapPts — computeZoneStop adds its own triggerBufferPts margin beyond
+// whichever edge it uses, so a full-stopCapPts-wide synthetic zone would
+// always push the total stop distance past stopCapPts and veto every single
+// synthetic-zone trigger with stop_exceeds_cap. Caught by hand-verifying the
+// test math before trusting it, not by the test itself.
+export function nearestZoneOrSynthetic(zones, entryPrice, stopCapPts, triggerBufferPts) {
+  if (!zones.length) {
+    const halfWidth = stopCapPts - triggerBufferPts;
+    return { side: null, low: entryPrice - halfWidth, high: entryPrice + halfWidth };
+  }
+  return zones.reduce((closest, z) => {
+    const mid = (z.low + z.high) / 2;
+    const closestMid = (closest.low + closest.high) / 2;
+    return Math.abs(mid - entryPrice) < Math.abs(closestMid - entryPrice) ? z : closest;
+  });
 }
 
 export function evaluateOrderFlowBot(ctx) {
@@ -106,13 +126,14 @@ export function evaluateOrderFlowBot(ctx) {
   }
 
   const bar = bars[index];
+  const zones = buildActiveZones(regimeInfo, { footprintZones, valueArea });
   let trigger = null;
   let zone = null;
 
   // detectFailedAuction is volume-profile-specific (needs the value area
   // directly, not a generic zone) — only meaningful on POS_GAMMA days, and
-  // checked before the 3 shared triggers since it's the more decisive signal
-  // when the value area itself has already rejected a probe.
+  // checked before everything else since it's the more decisive signal when
+  // the value area itself has already rejected a probe.
   if (regimeInfo.baseRegime === "POS_GAMMA" && valueArea) {
     const failed = detectFailedAuction(bars, index, valueArea, config.orderFlowBot.volumeProfile);
     if (failed) {
@@ -121,13 +142,16 @@ export function evaluateOrderFlowBot(ctx) {
     }
   }
 
+  // Absorption — genuinely zone-specific, checked per zone; zones already on
+  // cooldown are skipped so a different, still-eligible zone still gets a
+  // chance this same bar.
   if (!trigger) {
-    for (const candidateZone of buildActiveZones(regimeInfo, { footprintZones, valueArea })) {
+    for (const candidateZone of zones) {
       const candidateKey = zoneKeyFor(candidateZone);
       if (isZoneOnCooldown(candidateKey, dayState.zoneCooldowns, Date.now(), config.orderFlowBot.cooldownMinPerZone)) {
         continue;
       }
-      const result = evaluateOrderFlowZone(candidateZone, { bars, index, touchWindow, priorBars, config });
+      const result = evaluateZoneAbsorption(candidateZone, { bars, index, touchWindow, priorBars, config });
       if (result) {
         trigger = result;
         zone = candidateZone;
@@ -136,11 +160,38 @@ export function evaluateOrderFlowBot(ctx) {
     }
   }
 
+  // Path-of-least-resistance / lack-of-participation — zone-independent,
+  // checked once regardless of how many (if any) real zones currently exist.
+  if (!trigger) {
+    const polr = detectPathOfLeastResistance(bars, index, config.orderFlowBot.pathOfLeastResistance);
+    const lop = !polr ? detectLackOfParticipation(bars, index, config.orderFlowBot.lackOfParticipation) : null;
+    const tape = polr
+      ? { direction: polr.direction, trigger: "path_of_least_resistance" }
+      : lop
+        ? { direction: lop.direction, trigger: "lack_of_participation" }
+        : null;
+    if (tape) {
+      const candidateZone = nearestZoneOrSynthetic(
+        zones,
+        bar.close,
+        config.tradeManagement.stopCapPts,
+        config.orderFlowBot.triggerBufferPts
+      );
+      const candidateKey = zoneKeyFor(candidateZone);
+      if (!isZoneOnCooldown(candidateKey, dayState.zoneCooldowns, Date.now(), config.orderFlowBot.cooldownMinPerZone)) {
+        trigger = { ...tape, entryPrice: bar.close };
+        zone = candidateZone;
+      }
+    }
+  }
+
   if (!trigger) return null;
 
   const zoneKey = zoneKeyFor(zone);
-  // The failed_auction path above doesn't check cooldown until here — same
-  // cooldown map, checked once, regardless of which path found the trigger.
+  // failed_auction's own path above doesn't check cooldown until here — same
+  // cooldown map, checked once more regardless of which path found the
+  // trigger (a harmless no-op re-check for absorption/POLR/LOP, which
+  // already filtered on cooldown before ever setting trigger).
   if (isZoneOnCooldown(zoneKey, dayState.zoneCooldowns, Date.now(), config.orderFlowBot.cooldownMinPerZone)) {
     return null;
   }
