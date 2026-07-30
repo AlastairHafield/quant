@@ -550,7 +550,18 @@ export class Worker {
   }
 
   evaluateSignals(bar, t) {
-    if (minutesOf(t) >= CONFIG.entryCutoffET.h * 60 + CONFIG.entryCutoffET.m) return;
+    // Lower bound restores what the old orbLocked gate used to provide as a
+    // side effect (blocking pre-market entries until that day's ORB window
+    // resolved) before Phase 1 of the Order Flow Bot removed it — reasoned at
+    // the time as a harmless cleanup since Strategy B doesn't need the ORB,
+    // but its real consequence was a live-money strategy trading hours it
+    // never had before. Confirmed same-day: Strategy B took its first-ever
+    // pre-market trade at 02:04 ET on 2026-07-30, the same morning that gate
+    // shipped. Decided live to keep both strategies confined to
+    // sessionOpenET-entryCutoffET rather than leave that window open.
+    const minutes = minutesOf(t);
+    if (minutes < CONFIG.sessionOpenET.h * 60 + CONFIG.sessionOpenET.m) return;
+    if (minutes >= CONFIG.entryCutoffET.h * 60 + CONFIG.entryCutoffET.m) return;
 
     if (this.basisAsOf) {
       const health = checkDataHealth({

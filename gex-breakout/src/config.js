@@ -95,6 +95,10 @@ export const CONFIG = {
       valueAreaPct: 0.7,
       minSessionBars: 30,
       compositeDays: 5,
+      // How many trailing bars detectFailedAuction looks back across to find
+      // a probe outside the value area — separate from minSessionBars (which
+      // gates whether the whole session profile is trustworthy yet).
+      probeLookbackBars: 5,
     },
     footprint: {
       bucketSizePts: 1,

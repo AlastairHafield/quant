@@ -135,6 +135,55 @@ export async function fetchRecentBars(symbolText, lookbackMinutes) {
   return (data.bars ?? []).map((b) => ({ high: b.h, low: b.l, close: b.c, timestamp: b.t }));
 }
 
+function nyDateParts(isoTimestamp) {
+  const parts = new Intl.DateTimeFormat("en-CA", {
+    timeZone: "America/New_York",
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+    hourCycle: "h23",
+  }).formatToParts(new Date(isoTimestamp));
+  const get = (type) => parts.find((p) => p.type === type).value;
+  return { date: `${get("year")}-${get("month")}-${get("day")}`, nyTime: Number(get("hour")) * 100 + Number(get("minute")) };
+}
+
+// Historical 1-min OHLCV bars WITH real volume, shaped like
+// backend/src/api/databento.js's parsed bars ({date, ny_time, open, high,
+// low, close, volume}) so volumeProfile.js's groupBarsByDay/RTH-filtering
+// works unchanged regardless of provider. Deliberately TopstepX, not
+// Databento — Databento is reserved for the backend's historical
+// backtesting only (paid via separate free-credit balance); the live bot's
+// own data dependencies should stay limited to the broker it already
+// authenticates against for everything else. Confirmed live 2026-07-30:
+// despite no existing caller here ever having needed it, `History/
+// retrieveBars` does return a real per-bar `v` (volume) field, and a 6-day
+// 1-min pull came back complete in one call (5519 bars, no truncation) —
+// unverified beyond roughly that range, so a multi-week pull may need the
+// same monthly-chunking treatment Databento's own fetch already has.
+export async function fetchHistoricalBars(symbolText, { fromDate, toDate }) {
+  const contractId = await resolveFrontMonthContractId(symbolText);
+  const data = await apiPost("/api/History/retrieveBars", {
+    contractId,
+    live: false,
+    startTime: new Date(`${fromDate}T00:00:00Z`).toISOString(),
+    endTime: new Date(`${toDate}T23:59:59Z`).toISOString(),
+    unit: 2, // Minute
+    unitNumber: 1,
+    limit: 20000,
+    includePartialBar: false,
+  });
+  // TopstepX returns newest-first (confirmed live, same as its daily bars —
+  // see mechanical-orb's fetchDailyBars) — sort ascending by the raw
+  // timestamp before converting to ET date/time parts.
+  const sorted = [...(data.bars ?? [])].sort((a, b) => a.t.localeCompare(b.t));
+  return sorted.map((b) => {
+    const { date, nyTime } = nyDateParts(b.t);
+    return { date, ny_time: nyTime, open: b.o, high: b.h, low: b.l, close: b.c, volume: b.v ?? 0 };
+  });
+}
+
 export async function fetchLastPrice(symbolText) {
   const contractId = await resolveFrontMonthContractId(symbolText);
   const now = new Date();

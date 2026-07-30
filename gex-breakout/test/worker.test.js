@@ -258,6 +258,37 @@ test("Worker end-to-end: a strategy's own loss/win halt stops further trading fo
   assert.equal(worker.logger.size, 0); // tryStrategyB bails out on its own halt; tryOrderFlow has no signal logic yet
 });
 
+test("evaluateSignals: does not evaluate before sessionOpenET (pre-market)", () => {
+  const worker = createWorker();
+  worker.gexSnapshot = { netGex: -5e9, flipPoint: 5400, walls: { aboveSpot: [], belowSpot: [] } };
+  worker.basis = 0;
+  worker.rebuildLevels();
+
+  // 2:04am ET, matching the real pre-market trade this gate was added to
+  // prevent (2026-07-30, after Phase 1 removed the old orbLocked gate that
+  // used to block this as a side effect). lastRegimeInfo only ever gets set
+  // once evaluateSignals runs past the time gates, so it staying null proves
+  // the gate stopped it before regime classification, let alone either strategy.
+  worker.onBar(
+    esBar({ high: 5523, low: 5520, close: 5522, buyVolume: 300, sellVolume: 50 }),
+    new Date(2026, 6, 24, 2, 4)
+  );
+  assert.equal(worker.lastRegimeInfo, null);
+});
+
+test("evaluateSignals: evaluates normally at/after sessionOpenET", () => {
+  const worker = createWorker();
+  worker.gexSnapshot = { netGex: -5e9, flipPoint: 5400, walls: { aboveSpot: [], belowSpot: [] } };
+  worker.basis = 0;
+  worker.rebuildLevels();
+
+  worker.onBar(
+    esBar({ high: 5523, low: 5520, close: 5522, buyVolume: 300, sellVolume: 50 }),
+    new Date(2026, 6, 24, 9, 30)
+  );
+  assert.notEqual(worker.lastRegimeInfo, null); // reached regime classification — the gate let it through
+});
+
 test("Worker: onBar routes to the EOD flatten path (skips evaluateSignals) once past flattenAtET with an open trade", () => {
   const worker = createWorker();
   worker.gexSnapshot = { netGex: -5e9, flipPoint: 5400, walls: { aboveSpot: [], belowSpot: [] } };
