@@ -1116,6 +1116,25 @@ export class Worker {
   async executeSignal(result, regimeInfo, flow, size) {
     let orderId = null;
 
+    // Only the dynamic re-bracket paths (moveStop/TAKE_PARTIAL) used to clamp
+    // to the broker's minimum stop distance (live-verified 2026-07-24:
+    // rejected with "Invalid stop loss ticks... should be at least 4 ticks
+    // away") — never the initial entry, because Strategy A/B's structural
+    // stops were always comfortably wider than that in practice. The Order
+    // Flow Bot's computeZoneStop isn't: it places the stop triggerBufferPts
+    // (1pt = exactly 4 ticks on MES) beyond a zone edge, and entry often sits
+    // right at that same edge — caught by code review before ever hitting it
+    // live, not by a real rejection. Applied unconditionally (not just inside
+    // the live-execution branch below) so a signal-only log/trade-taken embed
+    // shows the stop a real order would actually use, not a theoretical one
+    // that would've been rejected.
+    result.stopPrice = clampStopDistance(
+      result.stopPrice,
+      result.entryPrice,
+      result.direction,
+      topstepx.MIN_STOP_TICKS * topstepx.tickSizeFor(CONFIG.instrumentTrade)
+    );
+
     if (isLiveExecutionAllowed(result.strategy, CONFIG)) {
       const accountRole = accountRoleFor(result.strategy);
       const accountId = await this.resolveAccountIdForRole(accountRole);

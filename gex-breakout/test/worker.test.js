@@ -359,6 +359,29 @@ test("tryOrderFlow: leaves POC/value area null while the session is still thin",
   assert.equal(worker.lastValueArea, null);
 });
 
+test("executeSignal: clamps a too-tight stop to the broker's minimum distance, even in signal-only mode", async () => {
+  const worker = createWorker();
+  // MIN_STOP_TICKS(4) * MES tickSize(0.25) = 1pt minimum — computeZoneStop
+  // can produce stops this tight (triggerBufferPts=1) when entry sits right
+  // at the zone edge; 0.1pt here stands in for that case.
+  const result = {
+    strategy: "OF", direction: "long", entryPrice: 5500, stopPrice: 5499.9, targetPrice: 5510,
+    zoneKey: "buy:5498.00-5500.00", sizeMultiplier: 1,
+  };
+  await worker.executeSignal(result, { regime: "NEG_GAMMA" }, { grade: "B" }, 2);
+  assert.equal(result.stopPrice, 5499);
+});
+
+test("executeSignal: leaves an already-adequate stop untouched", async () => {
+  const worker = createWorker();
+  const result = {
+    strategy: "B", direction: "short", entryPrice: 5500, stopPrice: 5510, targetPrice: 5480,
+    level: { price: 5500 }, sizeMultiplier: 1,
+  };
+  await worker.executeSignal(result, { regime: "NEG_GAMMA" }, { grade: "B" }, 2);
+  assert.equal(result.stopPrice, 5510);
+});
+
 test("evaluateSignals: does not evaluate before sessionOpenET (pre-market)", () => {
   const worker = createWorker();
   worker.gexSnapshot = { netGex: -5e9, flipPoint: 5400, walls: { aboveSpot: [], belowSpot: [] } };
