@@ -243,6 +243,44 @@ export class TradeBarAggregator {
   }
 }
 
+// Same GatewayTrade stream TradeBarAggregator already consumes (no new
+// subscription) — buckets by EXACT traded price within the minute, at
+// whatever tick granularity trades occur at. Deliberately does not re-bucket
+// to orderFlowBot.footprint.bucketSizePts itself — that's a config-driven
+// choice, and this adapter has no CONFIG dependency (matches TradeBarAggregator's
+// own convention); footprint.js's buildFootprintZones does the coarser
+// re-bucketing when it consumes these bars.
+export class FootprintBarAggregator {
+  constructor(onFootprintBar) {
+    this.onFootprintBar = onFootprintBar;
+    this.currentBucket = null;
+    this.levels = null; // Map<price, {buyVolume, sellVolume}>
+  }
+
+  onTrade({ price, volume, timestamp, type }) {
+    const bucket = minuteBucketStart(timestamp);
+    if (this.currentBucket !== null && bucket !== this.currentBucket) {
+      this.flush();
+    }
+    if (this.levels === null) this.levels = new Map();
+    this.currentBucket = bucket;
+    const level = this.levels.get(price) ?? { buyVolume: 0, sellVolume: 0 };
+    if (type === 0) level.buyVolume += volume;
+    else level.sellVolume += volume;
+    this.levels.set(price, level);
+  }
+
+  flush() {
+    if (this.levels && this.levels.size) {
+      const levels = [...this.levels.entries()]
+        .map(([price, v]) => ({ price, buyVolume: v.buyVolume, sellVolume: v.sellVolume }))
+        .sort((a, b) => a.price - b.price);
+      this.onFootprintBar(levels);
+    }
+    this.levels = null;
+  }
+}
+
 // ---- Account / order / position (execution) ----
 // order/place, Account/search, Position/searchOpen, Order/searchOpen confirmed
 // against the ProjectX Gateway docs 2026-07-24. Live-verify account selection and
@@ -428,10 +466,14 @@ const MARKET_HUB_URL = "https://rtc.topstepx.com/hubs/market";
 // correct. One thing the docs got wrong (or I misread): GatewayTrade's second arg is
 // an ARRAY of trade prints batched per event, not a single trade object — a real bug,
 // caught by logging the raw payload before trusting the assumed shape.
-export async function subscribeBars(symbolText, onBar) {
+// onFootprintBar is optional — existing callers (just gex-breakout's own
+// worker so far) are unaffected since it defaults to undefined and the
+// footprint aggregator is simply never constructed.
+export async function subscribeBars(symbolText, onBar, onFootprintBar) {
   const { HubConnectionBuilder, LogLevel } = await import("@microsoft/signalr");
   const contractId = await resolveFrontMonthContractId(symbolText);
   const aggregator = new TradeBarAggregator(onBar);
+  const footprintAggregator = onFootprintBar ? new FootprintBarAggregator(onFootprintBar) : null;
 
   const connection = new HubConnectionBuilder()
     .withUrl(MARKET_HUB_URL, { accessTokenFactory: () => getToken() })
@@ -440,11 +482,40 @@ export async function subscribeBars(symbolText, onBar) {
     .build();
 
   connection.on("GatewayTrade", (_evtContractId, trades) => {
-    for (const trade of trades) aggregator.onTrade(trade);
+    for (const trade of trades) {
+      aggregator.onTrade(trade);
+      footprintAggregator?.onTrade(trade);
+    }
   });
 
   await connection.start();
   await connection.invoke("SubscribeContractTrades", contractId);
+
+  return connection;
+}
+
+// Mirrors subscribeBars exactly (same hub, same accessTokenFactory pattern) —
+// per the ProjectX docs, GatewayDepth(contractId, data) events after invoking
+// SubscribeContractMarketDepth(contractId). The exact `data` shape is
+// UNCONFIRMED: this codebase has direct precedent for these docs being wrong
+// (GatewayTrade's second arg turned out to be an array, only caught by
+// logging the raw payload live) — deliberately not parsed here yet. Callers
+// get the raw event as-is; DepthBookAggregator.onDepthEvent (depthBook.js) is
+// where real parsing lands once a live session confirms the shape.
+export async function subscribeDepth(symbolText, onDepthEvent) {
+  const { HubConnectionBuilder, LogLevel } = await import("@microsoft/signalr");
+  const contractId = await resolveFrontMonthContractId(symbolText);
+
+  const connection = new HubConnectionBuilder()
+    .withUrl(MARKET_HUB_URL, { accessTokenFactory: () => getToken() })
+    .withAutomaticReconnect()
+    .configureLogging(LogLevel.Warning)
+    .build();
+
+  connection.on("GatewayDepth", (_evtContractId, data) => onDepthEvent(data));
+
+  await connection.start();
+  await connection.invoke("SubscribeContractMarketDepth", contractId);
 
   return connection;
 }

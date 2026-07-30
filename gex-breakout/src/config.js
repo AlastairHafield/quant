@@ -105,6 +105,9 @@ export const CONFIG = {
       imbalanceRatio: 3,
       minStackedLevels: 3,
       bigTradeSizeThreshold: 50,
+      // How many trailing bars detectTrappedParticipants looks across to
+      // confirm price failed to continue past a big trade's price.
+      reversalLookbackBars: 5,
     },
     depth: {
       sizeThreshold: 100, // resting-size floor to flag a candidate large order — tune live, no backtest possible

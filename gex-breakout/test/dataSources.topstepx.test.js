@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 import {
   minuteBucketStart,
   TradeBarAggregator,
+  FootprintBarAggregator,
   tickSizeFor,
   directionToSide,
   priceDistanceToTicks,
@@ -55,6 +56,42 @@ test("TradeBarAggregator: flush() on an empty aggregator is a no-op", () => {
   const agg = new TradeBarAggregator((bar) => bars.push(bar));
   agg.flush();
   assert.equal(bars.length, 0);
+});
+
+test("FootprintBarAggregator: buckets buy/sell volume per exact traded price within a minute", () => {
+  const footprintBars = [];
+  const agg = new FootprintBarAggregator((levels) => footprintBars.push(levels));
+
+  agg.onTrade({ price: 5500, volume: 10, timestamp: "2026-07-24T14:05:00Z", type: 0 }); // buy
+  agg.onTrade({ price: 5500, volume: 4, timestamp: "2026-07-24T14:05:10Z", type: 1 }); // sell, same price
+  agg.onTrade({ price: 5502, volume: 6, timestamp: "2026-07-24T14:05:20Z", type: 0 }); // buy, different price
+
+  assert.equal(footprintBars.length, 0); // nothing flushed yet
+  agg.flush();
+  assert.deepEqual(footprintBars, [
+    [
+      { price: 5500, buyVolume: 10, sellVolume: 4 },
+      { price: 5502, buyVolume: 6, sellVolume: 0 },
+    ],
+  ]);
+});
+
+test("FootprintBarAggregator: flushes automatically when a trade crosses into the next minute", () => {
+  const footprintBars = [];
+  const agg = new FootprintBarAggregator((levels) => footprintBars.push(levels));
+
+  agg.onTrade({ price: 5500, volume: 10, timestamp: "2026-07-24T14:05:10Z", type: 0 });
+  agg.onTrade({ price: 5500, volume: 5, timestamp: "2026-07-24T14:06:05Z", type: 0 }); // next minute
+
+  assert.equal(footprintBars.length, 1);
+  assert.deepEqual(footprintBars[0], [{ price: 5500, buyVolume: 10, sellVolume: 0 }]);
+});
+
+test("FootprintBarAggregator: flush() on an empty aggregator is a no-op", () => {
+  const footprintBars = [];
+  const agg = new FootprintBarAggregator((levels) => footprintBars.push(levels));
+  agg.flush();
+  assert.equal(footprintBars.length, 0);
 });
 
 test("tickSizeFor: known instruments resolve, unknown ones throw", () => {
