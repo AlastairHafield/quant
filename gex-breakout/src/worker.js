@@ -323,31 +323,7 @@ export class Worker {
         console.error("Mongo openTrade (reconciled) failed:", e.message);
       }
       this.trackedTrades.push(trade);
-      this.notifyManualTradeDetected(trade);
     }
-  }
-
-  // Flags a manually-placed trade (opened directly on the TopstepX platform,
-  // outside this bot's own code) as soon as the next poll picks it up —
-  // requested live 2026-07-28 after the user manually opened a trade to make
-  // back that morning's bug-caused losses: wants visibility into manual
-  // activity in Discord while the bot is still being smoothed out, without
-  // the bot trying to stop it.
-  notifyManualTradeDetected(trade) {
-    postDiscordEmbed(
-      CONFIG.discord.signalWebhook,
-      buildSignalEmbed({
-        title: `✋ Manual trade detected — GEX Breakout (${trade.accountRole === "A" ? "practice" : "real"})`,
-        description: `${trade.direction === "long" ? "LONG" : "SHORT"} ${trade.size}x @ ${trade.entryPrice} — opened outside the bot, now tracked for MFE/MAE and EOD flatten`,
-        color: 0xf5c842,
-        fields: [
-          ["Direction", trade.direction],
-          ["Size", trade.size],
-          ["Entry", trade.entryPrice],
-        ],
-        footerText: `GEX Breakout · manual trade · ${new Date().toISOString()}`,
-      })
-    ).catch((e) => console.error("Discord post failed:", e.message));
   }
 
   // The broker no longer reporting a position for a contract we're tracking means
@@ -452,33 +428,10 @@ export class Worker {
         realizedPnl,
       })
       .catch((e) => console.error("Mongo closeTrade failed:", e.message));
-
-    if (outcome === "manual_close") {
-      this.notifyManualClose(trade, approxExitPrice, realizedPnl);
-    }
-  }
-
-  // Flags a manual close (detected via classifyPassiveClose: the position
-  // disappeared but its bracket orders were still resting, so something
-  // outside this bot's own code closed it) — same request/reasoning as
-  // notifyManualTradeDetected above, so intervention is visible in Discord
-  // in real time, not just in the daily summary's manualCloses breakdown.
-  notifyManualClose(trade, exitPrice, realizedPnl) {
-    const pnlText = realizedPnl != null ? `${realizedPnl >= 0 ? "+" : "-"}$${Math.abs(realizedPnl).toFixed(2)}` : "—";
-    postDiscordEmbed(
-      CONFIG.discord.signalWebhook,
-      buildSignalEmbed({
-        title: `✋ Manual close detected — GEX Breakout · Strategy ${trade.strategy}`,
-        description: `Closed outside the bot's own bracket orders — approx exit ${exitPrice ?? "—"}, ${pnlText}`,
-        color: 0xf5c842,
-        fields: [
-          ["Direction", trade.direction],
-          ["Entry", trade.entryPrice],
-          ["Size", trade.size],
-        ],
-        footerText: `GEX Breakout · manual close · ${new Date().toISOString()}`,
-      })
-    ).catch((e) => console.error("Discord post failed:", e.message));
+    // outcome === "manual_close" used to also post a Discord alert here —
+    // removed 2026-07-30 at the user's request (no longer wants manual
+    // trade activity surfaced in Discord); still tagged manual_close in
+    // Mongo and counted in the daily summary's manualCloses breakdown.
   }
 
   rebuildLevels() {
