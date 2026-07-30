@@ -1142,36 +1142,24 @@ export function createWorker() {
 // gap-continuation's subscribeBarsWithRetry — linear backoff, no attempt
 // cap, since without market data this bot can't do anything anyway.
 // Returns the live connection so the staleness watchdog below can stop() it
-// and reconnect if bars ever go quiet mid-session.
+// and reconnect if bars/depth ever go quiet mid-session. Bars, footprint, and
+// depth all go through this ONE connection — confirmed live 2026-07-30 that a
+// second separate connection to the same MARKET_HUB_URL (the original design,
+// one function per subscription) gets its invoke repeatedly canceled by the
+// server; see subscribeBars' own comment in topstepx.js.
 async function subscribeBarsWithRetry(worker, attempt = 1) {
   try {
     return await topstepx.subscribeBars(
       CONFIG.instrumentData,
       (bar) => worker.onBar(bar),
-      (levels) => worker.onFootprintBar(levels)
+      (levels) => worker.onFootprintBar(levels),
+      (data) => worker.depthBook.onDepthEvent(data)
     );
   } catch (e) {
     const waitMs = Math.min(5000 * attempt, 60000);
     console.error(`subscribeBars failed (attempt ${attempt}): ${e.message} — retrying in ${waitMs / 1000}s`);
     await new Promise((resolve) => setTimeout(resolve, waitMs));
     return subscribeBarsWithRetry(worker, attempt + 1);
-  }
-}
-
-// Depth's own twin of subscribeBarsWithRetry, same reasoning (an unretried
-// initial-connect failure is an unhandled rejection that crashes the whole
-// process) — a wholly separate hub subscription from bars/trades, so it
-// needs its own independent retry loop rather than piggybacking on the bar
-// one. DepthBookAggregator.onDepthEvent does real parsing (see depthBook.js's
-// DOM_TYPE, confirmed live 2026-07-30).
-async function subscribeDepthWithRetry(worker, attempt = 1) {
-  try {
-    return await topstepx.subscribeDepth(CONFIG.instrumentData, (data) => worker.depthBook.onDepthEvent(data));
-  } catch (e) {
-    const waitMs = Math.min(5000 * attempt, 60000);
-    console.error(`subscribeDepth failed (attempt ${attempt}): ${e.message} — retrying in ${waitMs / 1000}s`);
-    await new Promise((resolve) => setTimeout(resolve, waitMs));
-    return subscribeDepthWithRetry(worker, attempt + 1);
   }
 }
 
@@ -1202,35 +1190,24 @@ async function startWorker() {
     5000
   );
   let barConnection = await subscribeBarsWithRetry(worker);
-  let depthConnection = await subscribeDepthWithRetry(worker);
 
-  // Forces a fresh SignalR connection if bars go quiet mid-session — see
-  // isBarStreamStale. .stop() before reconnecting so the old (zombie)
-  // connection doesn't linger duplicating GatewayTrade handlers.
+  // Forces a fresh SignalR connection if bars OR depth go quiet mid-session —
+  // both ride the same connection (see subscribeBarsWithRetry), so either
+  // staleness check reconnects the same one. .stop() before reconnecting so
+  // the old (zombie) connection doesn't linger duplicating handlers.
   setInterval(async () => {
-    if (!isBarStreamStale(worker.lastBarReceivedAt, nowET(), CONFIG)) return;
-    const staleMin = Math.round((Date.now() - worker.lastBarReceivedAt.getTime()) / 60_000);
-    console.error(`No bars received in ~${staleMin}min during the trading day — forcing a SignalR reconnect`);
+    const barsStale = isBarStreamStale(worker.lastBarReceivedAt, nowET(), CONFIG);
+    const depthStale = isDepthStreamStale(worker.depthBook.lastEventAt, nowET(), CONFIG);
+    if (!barsStale && !depthStale) return;
+    console.error(
+      `${barsStale ? "Bars" : "Depth"} stream stale during the trading day — forcing a SignalR reconnect`
+    );
     try {
       await barConnection.stop();
     } catch (e) {
-      console.error("Error stopping stale bar connection:", e.message);
+      console.error("Error stopping stale connection:", e.message);
     }
     barConnection = await subscribeBarsWithRetry(worker);
-  }, 60_000);
-
-  // Depth's own twin of the watchdog above — a separate hub subscription
-  // from bars, so it needs its own independent staleness check and reconnect.
-  setInterval(async () => {
-    if (!isDepthStreamStale(worker.depthBook.lastEventAt, nowET(), CONFIG)) return;
-    const staleMin = Math.round((Date.now() - worker.depthBook.lastEventAt.getTime()) / 60_000);
-    console.error(`No depth events received in ~${staleMin}min during the trading day — forcing a SignalR reconnect`);
-    try {
-      await depthConnection.stop();
-    } catch (e) {
-      console.error("Error stopping stale depth connection:", e.message);
-    }
-    depthConnection = await subscribeDepthWithRetry(worker);
   }, 60_000);
 
   // Reads "already flushed today" from Mongo rather than an in-memory flag —

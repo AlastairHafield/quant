@@ -466,10 +466,24 @@ const MARKET_HUB_URL = "https://rtc.topstepx.com/hubs/market";
 // correct. One thing the docs got wrong (or I misread): GatewayTrade's second arg is
 // an ARRAY of trade prints batched per event, not a single trade object — a real bug,
 // caught by logging the raw payload before trusting the assumed shape.
-// onFootprintBar is optional — existing callers (just gex-breakout's own
-// worker so far) are unaffected since it defaults to undefined and the
-// footprint aggregator is simply never constructed.
-export async function subscribeBars(symbolText, onBar, onFootprintBar) {
+//
+// onFootprintBar/onDepthEvent are both optional (existing callers unaffected —
+// each subscription is simply never made when its callback is omitted). They
+// MUST go through this same connection rather than a second one to
+// MARKET_HUB_URL: confirmed live 2026-07-30 that a separate subscribeDepth
+// connection alongside an already-open subscribeBars connection got its
+// SubscribeContractMarketDepth invoke repeatedly canceled ("Invocation
+// canceled due to the underlying connection being closed") — the server
+// tolerates one connection per client to this hub, not several. Standard
+// SignalR usage is one connection with multiple hub-method subscriptions
+// anyway; the original two-connection design was the mistake, not a
+// TopstepX quirk to work around.
+//
+// GatewayDepth's `data` is an ARRAY of entries `{timestamp, type, price,
+// volume, currentVolume}` — confirmed live 2026-07-30. `type` is ProjectX's
+// DomType code — see depthBook.js's DOM_TYPE for the confirmed enum and real
+// parsing.
+export async function subscribeBars(symbolText, onBar, onFootprintBar, onDepthEvent) {
   const { HubConnectionBuilder, LogLevel } = await import("@microsoft/signalr");
   const contractId = await resolveFrontMonthContractId(symbolText);
   const aggregator = new TradeBarAggregator(onBar);
@@ -487,35 +501,15 @@ export async function subscribeBars(symbolText, onBar, onFootprintBar) {
       footprintAggregator?.onTrade(trade);
     }
   });
+  if (onDepthEvent) {
+    connection.on("GatewayDepth", (_evtContractId, data) => onDepthEvent(data));
+  }
 
   await connection.start();
   await connection.invoke("SubscribeContractTrades", contractId);
-
-  return connection;
-}
-
-// Mirrors subscribeBars exactly (same hub, same accessTokenFactory pattern) —
-// per the ProjectX docs, GatewayDepth(contractId, data) events after invoking
-// SubscribeContractMarketDepth(contractId). `data` is an ARRAY of entries
-// `{timestamp, type, price, volume, currentVolume}` — confirmed live
-// 2026-07-30 (worth checking live rather than trusting the docs outright:
-// this codebase has direct precedent for them being wrong, e.g. GatewayTrade's
-// second arg turning out to be an array too). `type` is ProjectX's DomType
-// code — see depthBook.js's DOM_TYPE for the confirmed enum and real parsing.
-export async function subscribeDepth(symbolText, onDepthEvent) {
-  const { HubConnectionBuilder, LogLevel } = await import("@microsoft/signalr");
-  const contractId = await resolveFrontMonthContractId(symbolText);
-
-  const connection = new HubConnectionBuilder()
-    .withUrl(MARKET_HUB_URL, { accessTokenFactory: () => getToken() })
-    .withAutomaticReconnect()
-    .configureLogging(LogLevel.Warning)
-    .build();
-
-  connection.on("GatewayDepth", (_evtContractId, data) => onDepthEvent(data));
-
-  await connection.start();
-  await connection.invoke("SubscribeContractMarketDepth", contractId);
+  if (onDepthEvent) {
+    await connection.invoke("SubscribeContractMarketDepth", contractId);
+  }
 
   return connection;
 }
