@@ -1,12 +1,11 @@
 import { CONFIG } from "./config.js";
 import { buildFootprintZones } from "./footprint.js";
-import { topHeatmapZones } from "./depthBook.js";
+import { topHeatmapZones, detectLargeRestingOrders } from "./depthBook.js";
 
 // Only a bar/depth-staleness THRESHOLD check (isBarStreamStale/
 // isDepthStreamStale) knows about trading-day bounds — "connected" here just
 // means an event has arrived recently at all, useful at a glance regardless
-// of session time (e.g. confirming the depth hub is live overnight before
-// Phase 3b's shape-confirmation session even starts during RTH).
+// of session time.
 function recentlyEventedWithin(lastEventAt, maxAgeMin) {
   if (!lastEventAt) return false;
   return Date.now() - lastEventAt.getTime() <= maxAgeMin * 60_000;
@@ -66,6 +65,9 @@ export function buildStatusPayload(worker) {
       lastDepthEventAt: worker.depthBook.lastEventAt ? worker.depthBook.lastEventAt.toISOString() : null,
       activeZones: buildFootprintZones(worker.footprintBars, CONFIG.orderFlowBot.footprint),
       topDepthZones: topHeatmapZones(worker.depthBook.heatmap, 5),
+      largeRestingOrders: worker.depthBook.lastSnapshot
+        ? detectLargeRestingOrders(worker.depthBook.lastSnapshot, CONFIG.orderFlowBot.depth)
+        : [],
       zoneCooldowns: [...worker.riskManager.zoneCooldowns.keys()],
     },
     updatedAt: new Date().toISOString(),

@@ -496,12 +496,12 @@ export async function subscribeBars(symbolText, onBar, onFootprintBar) {
 
 // Mirrors subscribeBars exactly (same hub, same accessTokenFactory pattern) —
 // per the ProjectX docs, GatewayDepth(contractId, data) events after invoking
-// SubscribeContractMarketDepth(contractId). The exact `data` shape is
-// UNCONFIRMED: this codebase has direct precedent for these docs being wrong
-// (GatewayTrade's second arg turned out to be an array, only caught by
-// logging the raw payload live) — deliberately not parsed here yet. Callers
-// get the raw event as-is; DepthBookAggregator.onDepthEvent (depthBook.js) is
-// where real parsing lands once a live session confirms the shape.
+// SubscribeContractMarketDepth(contractId). `data` is an ARRAY of entries
+// `{timestamp, type, price, volume, currentVolume}` — confirmed live
+// 2026-07-30 (worth checking live rather than trusting the docs outright:
+// this codebase has direct precedent for them being wrong, e.g. GatewayTrade's
+// second arg turning out to be an array too). `type` is ProjectX's DomType
+// code — see depthBook.js's DOM_TYPE for the confirmed enum and real parsing.
 export async function subscribeDepth(symbolText, onDepthEvent) {
   const { HubConnectionBuilder, LogLevel } = await import("@microsoft/signalr");
   const contractId = await resolveFrontMonthContractId(symbolText);

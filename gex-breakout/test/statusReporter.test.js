@@ -33,13 +33,14 @@ test("buildStatusPayload: sane defaults before any data has arrived", () => {
   assert.equal(payload.orderFlowDiagnostics.lastDepthEventAt, null);
   assert.deepEqual(payload.orderFlowDiagnostics.activeZones, []);
   assert.deepEqual(payload.orderFlowDiagnostics.topDepthZones, []);
+  assert.deepEqual(payload.orderFlowDiagnostics.largeRestingOrders, []);
   assert.deepEqual(payload.orderFlowDiagnostics.zoneCooldowns, []);
 });
 
-test("buildStatusPayload: orderFlowDiagnostics reports connectivity once footprint/depth events arrive", () => {
+test("buildStatusPayload: orderFlowDiagnostics reports connectivity and real depth data once events arrive", () => {
   const worker = createWorker();
   worker.onFootprintBar([{ price: 5500, buyVolume: 60, sellVolume: 5 }]);
-  worker.depthBook.onDepthEvent({ anything: "unconfirmed shape" });
+  worker.depthBook.onDepthEvent([{ type: 2, price: 5498, volume: 150 }]); // BID, well above sizeThreshold:100
   worker.riskManager.recordOrderFlowTrade("VA_HIGH:5530.00", Date.now());
 
   const payload = buildStatusPayload(worker);
@@ -47,6 +48,7 @@ test("buildStatusPayload: orderFlowDiagnostics reports connectivity once footpri
   assert.notEqual(payload.orderFlowDiagnostics.lastFootprintBarAt, null);
   assert.equal(payload.orderFlowDiagnostics.depthConnected, true);
   assert.notEqual(payload.orderFlowDiagnostics.lastDepthEventAt, null);
+  assert.deepEqual(payload.orderFlowDiagnostics.largeRestingOrders, [{ side: "bid", price: 5498, size: 150 }]);
   assert.deepEqual(payload.orderFlowDiagnostics.zoneCooldowns, ["VA_HIGH:5530.00"]);
 });
 

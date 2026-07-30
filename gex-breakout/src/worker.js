@@ -211,7 +211,7 @@ export class Worker {
     this.lastBarReceivedAt = null; // real wall-clock time — see isBarStreamStale
     this.footprintBars = []; // per-minute footprint levels, from FootprintBarAggregator — see onFootprintBar
     this.lastFootprintBarAt = null; // real wall-clock time — see isDepthStreamStale's depth-side twin
-    this.depthBook = new depthBook.DepthBookAggregator();
+    this.depthBook = new depthBook.DepthBookAggregator(CONFIG.orderFlowBot.depth);
   }
 
   // Same convention as onBar's trade-bar handling: just accumulates for now.
@@ -1162,8 +1162,8 @@ async function subscribeBarsWithRetry(worker, attempt = 1) {
 // initial-connect failure is an unhandled rejection that crashes the whole
 // process) — a wholly separate hub subscription from bars/trades, so it
 // needs its own independent retry loop rather than piggybacking on the bar
-// one. Phase 3b/3c: DepthBookAggregator.onDepthEvent just logs the raw
-// payload for now (real parsing lands once the live shape is confirmed).
+// one. DepthBookAggregator.onDepthEvent does real parsing (see depthBook.js's
+// DOM_TYPE, confirmed live 2026-07-30).
 async function subscribeDepthWithRetry(worker, attempt = 1) {
   try {
     return await topstepx.subscribeDepth(CONFIG.instrumentData, (data) => worker.depthBook.onDepthEvent(data));
