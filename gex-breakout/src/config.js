@@ -16,7 +16,13 @@ export const CONFIG = {
   // mechanical-orb's own 15-min opening-range window, which already can't
   // enter before this time by construction.
   entryFloorET: { h: 9, m: 45 },
-  entryCutoffET: { h: 12, m: 0 }, // matches mechanical-orb's entry window
+  // Widened to EOD (user's call, 2026-07-31) -- previously matched
+  // mechanical-orb's noon entry cutoff, but that was borrowed from an
+  // ORB-specific reason (opening-range strategies stop looking for entries
+  // early) that never actually applied to Strategy B/the Order Flow Bot.
+  // Set equal to flattenAtET so entries stay open right up until the forced
+  // EOD flatten takes over.
+  entryCutoffET: { h: 15, m: 55 },
   flattenAtET: { h: 15, m: 55 }, // matches mechanical-orb's EOD flatten time
   sessionEndET: { h: 16, m: 0 },
   logFlushET: { h: 16, m: 5 }, // dump the day's structured log to Discord once, shortly after close

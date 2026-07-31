@@ -114,7 +114,7 @@ test("runChecks: passes end-to-end in NEG_GAMMA with open space and adequate flo
 });
 
 test("runChecks: vetoes past the trading cutoff", () => {
-  const result = runChecks(baseArgs({ nowET: new Date(2026, 6, 24, 15, 45) }));
+  const result = runChecks(baseArgs({ nowET: new Date(2026, 6, 24, 16, 0) }));
   assert.equal(result.pass, false);
   assert.equal(result.vetoReason, "past_trading_cutoff");
 });
