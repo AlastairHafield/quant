@@ -349,12 +349,56 @@ test("evaluateOrderFlowBot: vetoes once maxTradesPerDay is reached", () => {
   assert.deepEqual(result, { strategy: "OF", veto: "max_trades_per_day_reached" });
 });
 
-test("evaluateOrderFlowBot: vetoes when a wall sits too close in the trade's direction", () => {
+// The wall filter only applies to path_of_least_resistance (a CONTINUATION
+// trigger — "ride the move," where a nearby wall could genuinely stall it),
+// not to fade triggers (failed_auction/absorption/lack_of_participation),
+// which often trade TOWARD a nearby wall on purpose. Live-confirmed
+// 2026-07-31: applying it to both vetoed 32 of 51 OF evaluations on an
+// extreme positive-gamma day, 100% of them fade-type triggers.
+test("evaluateOrderFlowBot: vetoes a path-of-least-resistance (continuation) trigger when a wall sits too close ahead", () => {
+  const bars = [
+    { close: 90, buyVolume: 10, sellVolume: 10, cumDelta: 0 },
+    { close: 90, buyVolume: 10, sellVolume: 10, cumDelta: 0 },
+    { close: 90, buyVolume: 10, sellVolume: 10, cumDelta: 0 },
+    { close: 100, buyVolume: 5, sellVolume: 1, cumDelta: 10 },
+    { close: 101, buyVolume: 5, sellVolume: 1, cumDelta: 14 },
+    { close: 102, buyVolume: 5, sellVolume: 1, cumDelta: 18 },
+    { close: 103, buyVolume: 5, sellVolume: 1, cumDelta: 22 },
+  ];
+  // direction is "long" (see the unfiltered version of this same setup
+  // below) — a POS_WALL just ahead (above) is within nearPts(15) of entry 103.
+  const walls = { aboveSpot: [{ strike: 110, wallType: "POS_WALL", gex: -1 }], belowSpot: [] };
+  const result = evaluateOrderFlowBot({
+    nowET: before,
+    bars,
+    index: 6,
+    regimeInfo: { baseRegime: "NEG_GAMMA", regime: "NEG_GAMMA" },
+    footprintZones: [],
+    valueArea: null,
+    touchWindow: null,
+    priorBars: null,
+    walls,
+    config,
+    dayState: freshDayState(),
+  });
+  assert.deepEqual(result, {
+    strategy: "OF",
+    direction: "long",
+    zone: { side: null, low: 92, high: 114 },
+    zoneKey: "VA:92.00-114.00",
+    veto: "wall_too_close",
+  });
+});
+
+test("evaluateOrderFlowBot: a failed_auction (fade) trigger ignores a nearby wall — the whole point is trading toward it", () => {
   const bars = [
     { close: 103, high: 104, low: 102 },
     { close: 106.5, high: 107, low: 105.5 },
     { close: 104, high: 106, low: 103.5 },
   ];
+  // Same wall-too-close setup as the continuation test above, just on the
+  // fade trigger's side (below spot, since this fade is a short) — proves
+  // it's ignored rather than vetoed.
   const walls = { aboveSpot: [], belowSpot: [{ strike: 103, wallType: "POS_WALL", gex: -1 }] };
   const result = evaluateOrderFlowBot({
     nowET: before,
@@ -369,13 +413,10 @@ test("evaluateOrderFlowBot: vetoes when a wall sits too close in the trade's dir
     config,
     dayState: freshDayState(),
   });
-  assert.deepEqual(result, {
-    strategy: "OF",
-    direction: "short",
-    zone: { side: null, low: 100, high: 105 },
-    zoneKey: "VA:100.00-105.00",
-    veto: "wall_too_close",
-  });
+  assert.equal(result.veto, null);
+  assert.equal(result.trigger, "failed_auction");
+  assert.equal(result.direction, "short");
+  assert.equal(result.sizeMultiplier, 1); // never gets to the half-size SKIP_OR_HALF branch either
 });
 
 test("evaluateOrderFlowBot: vetoes when the stop would exceed stopCapPts", () => {

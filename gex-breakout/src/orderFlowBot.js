@@ -196,7 +196,22 @@ export function evaluateOrderFlowBot(ctx) {
     return null;
   }
 
-  const wallResult = directionalWallFilter(trigger.entryPrice, trigger.direction, walls, config.levels.wallFilter);
+  // The wall filter only makes sense for a CONTINUATION trigger
+  // (path_of_least_resistance: "ride the move that's already happening") —
+  // a nearby POS_WALL ahead can genuinely stall/reverse that kind of move,
+  // the same risk it guards against for Strategy A/B's breakouts. Every
+  // other OF trigger (failed_auction, absorption, lack_of_participation) is
+  // a FADE toward the nearest structure — shorting into a nearby POS_WALL
+  // is often the whole thesis there, not a risk to dodge. Applying the same
+  // filter to both was vetoing the large majority of OF's signals on
+  // extreme positive-gamma days (live-confirmed 2026-07-31: 32 of 51 OF
+  // evaluations that day were wall_too_close, 100% of them fade-type
+  // triggers, on a day where POS_WALLs sat packed densely around spot —
+  // exactly the days OF's fade logic exists for).
+  const isContinuationTrigger = trigger.trigger === "path_of_least_resistance";
+  const wallResult = isContinuationTrigger
+    ? directionalWallFilter(trigger.entryPrice, trigger.direction, walls, config.levels.wallFilter)
+    : { action: "FULL", wall: null, distance: null };
   if (wallResult.action === "SKIP_OR_HALF" && config.levels.wallFilter.mode === "skip") {
     return { strategy: "OF", direction: trigger.direction, zone, zoneKey, veto: "wall_too_close" };
   }
