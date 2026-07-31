@@ -345,11 +345,62 @@ export class Worker {
   // we're polling REST rather than trusting the unverified user-hub push stream.
   // Exit price is approximated as the last known bar close (detection lag up to the
   // 5s poll interval) — good enough for MFE/MAE, not exact realized P&L.
-  async detectClosedTrades() {
-    const stillOpenByRole = {
+  stillOpenContractsByRole() {
+    return {
       default: new Set(this.openPositions.map((p) => p.contractId)),
       A: new Set(this.openPositionsA.map((p) => p.contractId)),
     };
+  }
+
+  // Startup-only safety net: a trade can go stuck at status:"open" in Mongo
+  // forever if the worker restarts in the narrow window between a real fill
+  // (any close — bracket, manual, EOD flatten, or a reopenAt-driven stop
+  // tighten/partial) and the next detectClosedTrades poll that would have
+  // noticed it. Confirmed live 2026-07-31: a reopenAt stop-tighten closed
+  // and reopened a position, and a deploy's restart landed 4 seconds before
+  // the reopened leg's own stop got hit — trackedTrades (in-memory) was
+  // wiped by the restart, so by the time polling resumed the position was
+  // already flat with nothing left to reconcile against. Runs once at
+  // startup, after the first real position poll, and uses the same real-fill
+  // lookup logClosedTrade relies on rather than any approximation.
+  // journalClient/brokerClient default to the real modules; tests pass fakes
+  // so this can be verified without a live Mongo/broker — same pattern as
+  // classifyPassiveClose/logClosedTrade's own client param (this file's ESM
+  // namespace imports can't be monkey-patched from outside).
+  async reconcileOrphanedMongoTrades(journalClient = tradeJournal, brokerClient = topstepx) {
+    const openDocs = await journalClient.fetchOpenTrades().catch((e) => {
+      console.error("fetchOpenTrades failed:", e.message);
+      return [];
+    });
+    if (!openDocs.length) return;
+    const stillOpenByRole = this.stillOpenContractsByRole();
+    for (const doc of openDocs) {
+      if (stillOpenByRole[doc.accountRole ?? "default"].has(doc.contractId)) continue; // broker confirms it's genuinely still open
+
+      try {
+        const accountId = await brokerClient.resolveAccountId(
+          doc.accountRole === "A" ? CONFIG.orderFlowBot.accountNameHint : undefined
+        );
+        const fills = await brokerClient.fetchClosingTrades(accountId, doc.contractId, doc.openedAt);
+        const real = summarizeClosingFills(fills);
+        if (!real) continue; // no closing fill found (yet) either — leave it for a later pass rather than guess
+        await journalClient.closeTrade(doc._id, {
+          closedAt: new Date().toISOString(),
+          exitPrice: real.exitPrice,
+          outcome: "closed",
+          mfe: doc.mfe ?? 0,
+          mae: doc.mae ?? 0,
+          realizedPnl: real.realizedPnl,
+        });
+        console.log(`Reconciled orphaned trade ${doc._id} (${doc.strategy}): real P&L ${real.realizedPnl}`);
+      } catch (e) {
+        console.error(`reconcileOrphanedMongoTrades failed for ${doc._id}:`, e.message);
+      }
+    }
+  }
+
+  async detectClosedTrades() {
+    const stillOpenByRole = this.stillOpenContractsByRole();
     const remaining = [];
     for (const trade of this.trackedTrades) {
       if (stillOpenByRole[trade.accountRole ?? "default"].has(trade.contractId)) {
@@ -1357,7 +1408,13 @@ async function startWorker() {
 
   worker.recalcGex().catch((e) => console.error("Initial GEX recalc failed:", e.message));
   worker.recalcBasis().catch((e) => console.error("Initial basis recalc failed:", e.message));
-  worker.pollAccount().catch((e) => console.error("Initial account poll failed:", e.message));
+  // Awaited (not fire-and-forget like the recalcs above) — reconciliation
+  // needs a fresh read of real open positions to know what's genuinely still
+  // open vs. orphaned, so it must run after this specific poll resolves.
+  await worker.pollAccount().catch((e) => console.error("Initial account poll failed:", e.message));
+  await worker
+    .reconcileOrphanedMongoTrades()
+    .catch((e) => console.error("Orphaned trade reconciliation failed:", e.message));
 
   setInterval(
     () => worker.recalcGex().catch((e) => console.error("GEX recalc failed:", e.message)),

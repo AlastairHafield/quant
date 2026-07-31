@@ -853,6 +853,71 @@ test("logClosedTrade: falls back to the bar-close approximation when the real-fi
   assert.equal(worker.riskManager.winsToday.B, 1);
 });
 
+test("reconcileOrphanedMongoTrades: closes a Mongo-open trade the broker no longer shows open, using its real fills", async () => {
+  const worker = createWorker();
+  worker.openPositions = []; // broker: nothing open on the default-role account
+  worker.openPositionsA = [];
+  const closedCalls = [];
+  const fakeJournal = {
+    fetchOpenTrades: async () => [
+      {
+        _id: "doc1",
+        strategy: "OF",
+        accountRole: "A",
+        contractId: "CON.F.US.MES.U26",
+        openedAt: "2026-07-31T19:11:00.444Z",
+        mfe: 0,
+        mae: 0,
+      },
+    ],
+    closeTrade: async (id, update) => closedCalls.push({ id, update }),
+  };
+  const fakeBroker = {
+    resolveAccountId: async () => "acct1",
+    fetchClosingTrades: async () => [
+      { price: 7513.75, profitAndLoss: 7.5 },
+      { price: 7514.5, profitAndLoss: -10 },
+    ],
+  };
+
+  await worker.reconcileOrphanedMongoTrades(fakeJournal, fakeBroker);
+
+  assert.equal(closedCalls.length, 1);
+  assert.equal(closedCalls[0].id, "doc1");
+  assert.equal(closedCalls[0].update.exitPrice, 7514.5); // last closing fill
+  assert.equal(closedCalls[0].update.realizedPnl, -2.5); // sum of both legs
+  assert.equal(closedCalls[0].update.outcome, "closed");
+});
+
+test("reconcileOrphanedMongoTrades: leaves a trade alone if the broker still reports it open", async () => {
+  const worker = createWorker();
+  worker.openPositions = [{ contractId: "CON.F.US.MES.U26" }]; // still genuinely open
+  worker.openPositionsA = [];
+  const fakeJournal = {
+    fetchOpenTrades: async () => [
+      { _id: "doc1", strategy: "B", accountRole: "default", contractId: "CON.F.US.MES.U26", openedAt: new Date().toISOString() },
+    ],
+    closeTrade: async () => assert.fail("should not close a trade the broker still reports open"),
+  };
+  const fakeBroker = { fetchClosingTrades: async () => assert.fail("should not even check fills") };
+
+  await worker.reconcileOrphanedMongoTrades(fakeJournal, fakeBroker);
+});
+
+test("reconcileOrphanedMongoTrades: leaves a trade alone if no closing fill is found yet", async () => {
+  const worker = createWorker();
+  worker.openPositions = [];
+  worker.openPositionsA = [];
+  const fakeJournal = {
+    fetchOpenTrades: async () => [
+      { _id: "doc1", strategy: "B", accountRole: "default", contractId: "CON.F.US.MES.U26", openedAt: new Date().toISOString() },
+    ],
+    closeTrade: async () => assert.fail("should not close without a real closing fill to base it on"),
+  };
+  const fakeBroker = { resolveAccountId: async () => "acct1", fetchClosingTrades: async () => [] };
+
+  await worker.reconcileOrphanedMongoTrades(fakeJournal, fakeBroker);
+});
 
 test("confirmRealEntryPrice: corrects entry/stop/target to the broker's real fill, preserving the R-distance", async () => {
   const worker = createWorker();

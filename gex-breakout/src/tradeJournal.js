@@ -92,6 +92,17 @@ export async function fetchDayTrades(dayKey) {
   return db.collection("trades").find({ dayKey }).sort({ openedAt: 1 }).toArray();
 }
 
+// Trades still marked "open" regardless of day -- used by worker.js's
+// startup reconciliation to catch a trade that closed for real at the
+// broker while the process was down (or in the narrow gap around a
+// restart) and so never got a chance to be marked closed. Not scoped to
+// today's dayKey since an orphan could in principle be left over from a
+// prior day if a restart landed at exactly the wrong moment.
+export async function fetchOpenTrades(system = "gex-breakout") {
+  const db = await getDb();
+  return db.collection("trades").find({ system, status: "open" }).toArray();
+}
+
 export async function fetchDayExitActions(dayKey) {
   const db = await getDb();
   return db.collection("exitActions").find({ dayKey }).sort({ ts: 1 }).toArray();
