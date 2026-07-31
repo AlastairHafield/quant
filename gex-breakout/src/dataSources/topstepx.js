@@ -391,6 +391,25 @@ export async function searchOpenOrders(accountId) {
   return data.orders;
 }
 
+// Real fills for a contract since a trade opened — the ground truth for
+// what actually happened at the broker, as opposed to worker.js's old
+// approximation (the latest bar's close at detection time), which could be
+// wildly wrong for a trade that closes within the same bar it opened (no
+// new bar has arrived yet to approximate from). Live-verified 2026-07-31: a
+// stop that slipped 6 ticks past its nominal price got reported as a small
+// WIN instead of the real ~$52 loss, silently corrupting the win/loss halt.
+// Entry fills carry profitAndLoss: null (nothing realized yet); this filters
+// to only the closing fill(s), so a caller doesn't need to match order IDs
+// to tell entry and exit apart.
+export async function fetchClosingTrades(accountId, contractId, sinceIso) {
+  const data = await apiPost("/api/Trade/search", {
+    accountId,
+    startTimestamp: sinceIso,
+    endTimestamp: new Date().toISOString(),
+  });
+  return data.trades.filter((t) => t.contractId === contractId && t.profitAndLoss != null);
+}
+
 export async function cancelOrder(accountId, orderId) {
   return apiPost("/api/Order/cancel", { accountId, orderId });
 }

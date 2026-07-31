@@ -781,16 +781,76 @@ test("classifyPassiveClose: falls back to closed if the broker check itself fail
   assert.equal(outcome, "closed");
 });
 
-test("logClosedTrade: a manual_close outcome is logged distinctly and still feeds the win/loss halt like any other close", () => {
+test("logClosedTrade: a manual_close outcome is logged distinctly and still feeds the win/loss halt like any other close", async () => {
   const worker = createWorker();
   worker.bars.push({ close: 5508 }); // closed above entry -> a win, same as if the target had filled
-  worker.logClosedTrade(
-    { strategy: "B", direction: "long", entryPrice: 5500, mfe: 8, mae: 0, mongoId: null },
-    "manual_close"
+  // No real fills available (fakeClient) -> falls back to the bar-close approximation.
+  const fakeClient = { resolveAccountId: async () => "acct1", fetchClosingTrades: async () => [] };
+  await worker.logClosedTrade(
+    {
+      strategy: "B",
+      direction: "long",
+      entryPrice: 5500,
+      mfe: 8,
+      mae: 0,
+      mongoId: null,
+      contractId: "CON.F.US.EP.U26",
+      openedAt: new Date().toISOString(),
+    },
+    "manual_close",
+    fakeClient
   );
   assert.equal(worker.riskManager.winsToday.B, 1);
   const row = worker.logger.buffer.find((r) => r.outcome === "manual_close");
   assert.ok(row, "expected a manual_close log row");
+});
+
+test("logClosedTrade: uses the broker's real closing fill(s) instead of the bar-close approximation", async () => {
+  const worker = createWorker();
+  worker.bars.push({ close: 9999 }); // would look like a big win if the approximation were used
+  const fakeClient = {
+    resolveAccountId: async () => "acct1",
+    fetchClosingTrades: async () => [
+      { price: 5495, profitAndLoss: -25 }, // e.g. a partial
+      { price: 5490, profitAndLoss: -50 }, // final leg
+    ],
+  };
+  await worker.logClosedTrade(
+    {
+      strategy: "B",
+      direction: "long",
+      entryPrice: 5500,
+      mfe: 0,
+      mae: 10,
+      mongoId: null,
+      contractId: "CON.F.US.EP.U26",
+      openedAt: new Date().toISOString(),
+    },
+    "closed",
+    fakeClient
+  );
+  const row = worker.logger.buffer.find((r) => r.outcome === "closed");
+  assert.equal(row.approx_exit_price, 5490); // last closing fill's price, not the bar close
+  assert.equal(row.realized_pnl, -75); // sum of both closing fills' real P&L
+  assert.equal(worker.riskManager.lossesToday.B, 1); // correctly counted as a loss, not the fake win the bar close would imply
+});
+
+test("logClosedTrade: falls back to the bar-close approximation when the real-fill lookup fails", async () => {
+  const worker = createWorker();
+  worker.bars.push({ close: 5508 });
+  const fakeClient = {
+    resolveAccountId: async () => {
+      throw new Error("network down");
+    },
+  };
+  await worker.logClosedTrade(
+    { strategy: "B", direction: "long", entryPrice: 5500, mfe: 8, mae: 0, mongoId: null, contractId: "CON.F.US.EP.U26", openedAt: new Date().toISOString() },
+    "closed",
+    fakeClient
+  );
+  const row = worker.logger.buffer.find((r) => r.outcome === "closed");
+  assert.equal(row.approx_exit_price, 5508);
+  assert.equal(worker.riskManager.winsToday.B, 1);
 });
 
 

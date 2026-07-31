@@ -122,6 +122,20 @@ export function isDepthStreamStale(lastDepthEventAt, now, config) {
   return isStreamStale(lastDepthEventAt, now, config, config.depthStaleThresholdMin);
 }
 
+// Reduces a contract's real closing fills (see topstepx.js's
+// fetchClosingTrades) into what logClosedTrade needs: the realized P&L is
+// the SUM of every closing fill since the trade opened (a partial-profit
+// take followed by a final stop/target exit both count, not just the last
+// one), and the displayed exit price is the LAST (most recent) fill,
+// standing in for "where it finally closed." Returns null for an empty
+// list so the caller can fall back to the old bar-close approximation.
+export function summarizeClosingFills(fills) {
+  if (!fills.length) return null;
+  const realizedPnl = fills.reduce((sum, f) => sum + f.profitAndLoss, 0);
+  const exitPrice = fills[fills.length - 1].price;
+  return { exitPrice, realizedPnl };
+}
+
 // Returns the day-key to flush for if it's at/past the scheduled flush time,
 // else null — pure, so the "is it time" logic is testable separately from
 // the setInterval wiring that calls it. Whether that day has already been
@@ -342,7 +356,7 @@ export class Worker {
         remaining.push(trade);
       } else {
         const outcome = await this.classifyPassiveClose(trade);
-        this.logClosedTrade(trade, outcome);
+        await this.logClosedTrade(trade, outcome);
       }
     }
     this.trackedTrades = remaining;
@@ -381,9 +395,30 @@ export class Worker {
     }
   }
 
-  logClosedTrade(trade, outcome = "closed") {
+  async logClosedTrade(trade, outcome = "closed", client = topstepx) {
+    // Real fills first — a bracket fill/manual close/EOD flatten/EXIT_NOW
+    // all land here, and the broker always knows the true exit price/P&L
+    // regardless of which path closed it. Falls back to the old bar-close
+    // approximation only if the lookup itself fails (network hiccup, or the
+    // account can't be resolved) — see fetchClosingTrades' own comment for
+    // why the approximation alone isn't trustworthy.
+    let real = null;
+    try {
+      const role = trade.accountRole ?? "default";
+      const accountId = await client.resolveAccountId(role === "A" ? CONFIG.orderFlowBot.accountNameHint : undefined);
+      const fills = await client.fetchClosingTrades(accountId, trade.contractId, trade.openedAt);
+      real = summarizeClosingFills(fills);
+    } catch (e) {
+      console.error("fetchClosingTrades failed, falling back to bar-close approximation:", e.message);
+    }
+
     const lastBar = this.bars.length ? this.bars[this.bars.length - 1] : null;
-    const approxExitPrice = lastBar?.close ?? null;
+    const approxExitPrice = real?.exitPrice ?? lastBar?.close ?? null;
+    const realizedPnl =
+      real?.realizedPnl ??
+      (approxExitPrice != null
+        ? computeRealizedPnl(trade.entryPrice, approxExitPrice, trade.direction, POINT_VALUE[CONFIG.instrumentTrade], trade.size)
+        : null);
     const row = buildLogRow({
       ts: new Date().toISOString(),
       strategy: trade.strategy,
@@ -395,10 +430,6 @@ export class Worker {
       mfe: trade.mfe,
       mae: trade.mae,
     });
-    const realizedPnl =
-      approxExitPrice != null
-        ? computeRealizedPnl(trade.entryPrice, approxExitPrice, trade.direction, POINT_VALUE[CONFIG.instrumentTrade], trade.size)
-        : null;
     row.approx_exit_price = approxExitPrice; // not part of the base schema, tacked on for this analysis
     row.realized_pnl = realizedPnl;
     this.logger.log(row);
@@ -409,9 +440,10 @@ export class Worker {
     // trade closure before, so the old bot-wide consecutive-loss counter
     // stayed at 0 forever and the kill switch could never trip no matter how
     // many real losses happened (caught live 2026-07-24: the dashboard's
-    // counter was still 0 right after a real losing trade closed).
-    // approxExitPrice carries the same detection-lag imprecision noted above,
-    // so this is a win/loss determination, not an exact realized PnL figure.
+    // counter was still 0 right after a real losing trade closed). Only
+    // recordTradeResult's SIGN matters (win/loss), so real.realizedPnl
+    // (dollars) or the approxExitPrice-derived points both work — using
+    // points keeps this consistent whether real fills came back or not.
     if (approxExitPrice != null) {
       const approxPnlPts =
         trade.direction === "long" ? approxExitPrice - trade.entryPrice : trade.entryPrice - approxExitPrice;
@@ -546,7 +578,7 @@ export class Worker {
       }
     }
     for (const trade of this.trackedTrades) {
-      this.logClosedTrade(trade, "eod_flatten");
+      await this.logClosedTrade(trade, "eod_flatten");
     }
     this.trackedTrades = [];
   }
@@ -951,7 +983,7 @@ export class Worker {
       const accountId = await this.resolveAccountIdForRole(trade.accountRole ?? "default");
       await topstepx.closePositionAndCancelOrders(accountId, trade.contractId);
       this.trackedTrades = this.trackedTrades.filter((t) => t !== trade);
-      this.logClosedTrade(trade, result.reason);
+      await this.logClosedTrade(trade, result.reason);
       this.logDynamicExitAction(trade, "EXIT_NOW", result.reason, valueSaved, {
         exitPrice: bar.close,
         originalStopPrice: trade.originalStopPrice,
@@ -1106,7 +1138,7 @@ export class Worker {
     const toClose = tradesRequiringCloseOnFlip(roleTrackedTrades, contractId, newDirection);
     if (!toClose.length) return;
     await topstepx.closePositionAndCancelOrders(accountId, contractId);
-    for (const trade of toClose) this.logClosedTrade(trade);
+    for (const trade of toClose) await this.logClosedTrade(trade);
     const toCloseSet = new Set(toClose);
     this.trackedTrades = this.trackedTrades.filter((t) => !toCloseSet.has(t));
   }
