@@ -11,7 +11,8 @@ import { getBacktestRuns, getBacktestTrades, getEarningsEvents, removeStock, get
 import { setGexBreakoutStatus, getGexBreakoutStatus } from '../data/gexBreakoutStatus.js';
 import { setMechanicalOrbStatus, getMechanicalOrbStatus } from '../data/mechanicalOrbStatus.js';
 import { setGapContinuationStatus, getGapContinuationStatus } from '../data/gapContinuationStatus.js';
-import { fetchTrades, fetchExitActions, fetchDailySummaries } from '../data/tradeJournalMongo.js';
+import { fetchTrades, fetchExitActions, fetchDailySummaries, fetchLedgerTrades, fetchDailyLedger } from '../data/tradeJournalMongo.js';
+import { summarizeLiveTrades, computeLiveVsBacktestDrift } from '../engine/reconciliation.js';
 
 const router = express.Router();
 
@@ -531,6 +532,55 @@ router.get('/trade-journal/daily-summaries', async (req, res) => {
   try {
     const summaries = await fetchDailySummaries();
     res.json({ success: true, data: summaries });
+  } catch (e) {
+    res.status(500).json({ success: false, error: e.message });
+  }
+});
+
+// === UNIFIED LEDGER (Phase 3 — all three strategies' Mongo trade journals, one place) ===
+
+router.get('/ledger/trades', async (req, res) => {
+  try {
+    const trades = await fetchLedgerTrades({
+      dayKey: req.query.dayKey || undefined,
+      system: req.query.system || undefined,
+    });
+    res.json({ success: true, data: trades });
+  } catch (e) {
+    res.status(500).json({ success: false, error: e.message });
+  }
+});
+
+router.get('/ledger/daily', async (req, res) => {
+  if (!req.query.dayKey) {
+    return res.status(400).json({ success: false, error: 'dayKey is required (Date.prototype.toDateString() format, e.g. "Mon Jan 05 2026")' });
+  }
+  try {
+    const ledger = await fetchDailyLedger(req.query.dayKey);
+    res.json({ success: true, data: ledger });
+  } catch (e) {
+    res.status(500).json({ success: false, error: e.message });
+  }
+});
+
+// === LIVE-VS-BACKTEST RECONCILIATION (Phase 3) ===
+// Deliberately takes backtestStats from the caller rather than re-deriving it
+// here — see reconciliation.js's own comment on why auto-mapping a live
+// bot's config onto a backtest engine's params is left to a human/agent who
+// knows the intended mapping, not guessed at in this endpoint. Call
+// /orb/backtest/run or /gapfill/backtest/run yourself over the same date
+// range with the live bot's real parameters, then pass its
+// data.metrics.full (or .oos) straight through as backtestStats.
+router.post('/reconciliation/run', async (req, res) => {
+  const { system, closedFrom, closedTo, backtestStats, tolerances } = req.body;
+  if (!system || !closedFrom || !closedTo || !backtestStats) {
+    return res.status(400).json({ success: false, error: 'system, closedFrom, closedTo, and backtestStats are required' });
+  }
+  try {
+    const liveTrades = await fetchLedgerTrades({ system, closedFrom, closedTo, limit: 2000 });
+    const liveStats = summarizeLiveTrades(liveTrades);
+    const drift = computeLiveVsBacktestDrift(liveStats, backtestStats, tolerances || {});
+    res.json({ success: true, data: { system, closedFrom, closedTo, liveStats, backtestStats, ...drift } });
   } catch (e) {
     res.status(500).json({ success: false, error: e.message });
   }
