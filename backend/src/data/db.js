@@ -139,6 +139,20 @@ function initSchema() {
       PRIMARY KEY (symbol, utc_datetime)
     );
 
+    -- Per-minute aggressor-side buy/sell volume, reconstructed from Databento
+    -- tick trades (expensive — ~90x the cost of 1-min OHLCV for the same span).
+    -- Cached per day so a long multi-day pull is resumable after any
+    -- interruption (timeout, connection drop, sleep) instead of re-paying for
+    -- days already fetched.
+    CREATE TABLE IF NOT EXISTS tick_volume_1m (
+      symbol TEXT,
+      date TEXT,
+      ny_time INTEGER,
+      buy_volume REAL,
+      sell_volume REAL,
+      PRIMARY KEY (symbol, date, ny_time)
+    );
+
     CREATE TABLE IF NOT EXISTS mr_backtest_runs (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
       run_at TEXT DEFAULT (datetime('now')),
@@ -263,6 +277,55 @@ function initSchema() {
       exit_result TEXT,
       bars_held INTEGER,
       or_range_pct REAL,
+      gap_pct REAL,
+      gross_return_pct REAL,
+      return_pct REAL,
+      pnl_dollars REAL,
+      regime_trend TEXT,
+      sample TEXT
+    );
+
+    CREATE TABLE IF NOT EXISTS gap_fill_backtest_runs (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      run_at TEXT DEFAULT (datetime('now')),
+      symbol TEXT,
+      date_from TEXT,
+      date_to TEXT,
+      timeframe TEXT,
+      sweep_id TEXT,
+      total_trades INTEGER,
+      win_rate REAL,
+      total_return_pct REAL,
+      avg_trade_return_pct REAL,
+      sharpe REAL,
+      profit_factor REAL,
+      max_drawdown_pct REAL,
+      is_trades INTEGER,
+      is_win_rate REAL,
+      is_return_pct REAL,
+      is_sharpe REAL,
+      is_profit_factor REAL,
+      oos_trades INTEGER,
+      oos_win_rate REAL,
+      oos_return_pct REAL,
+      oos_sharpe REAL,
+      oos_profit_factor REAL,
+      params TEXT,
+      metrics TEXT
+    );
+
+    CREATE TABLE IF NOT EXISTS gap_fill_backtest_trades (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      run_id INTEGER REFERENCES gap_fill_backtest_runs(id),
+      trade_date TEXT,
+      entry_time INTEGER,
+      signal TEXT,
+      entry_price REAL,
+      target_price REAL,
+      stop_price REAL,
+      exit_price REAL,
+      exit_result TEXT,
+      bars_held INTEGER,
       gap_pct REAL,
       gross_return_pct REAL,
       return_pct REAL,
@@ -467,6 +530,28 @@ export function getBars1m(symbol, from, to) {
   `).all(symbol, from, to);
 }
 
+// Tick-derived per-minute buy/sell volume cache — see tick_volume_1m above.
+export function upsertTickVolume1m(symbol, date, rows) {
+  const db = getDb();
+  const insert = db.prepare(`
+    INSERT OR REPLACE INTO tick_volume_1m (symbol, date, ny_time, buy_volume, sell_volume)
+    VALUES (@symbol, @date, @ny_time, @buy_volume, @sell_volume)
+  `);
+  db.transaction((rs) => rs.forEach(r => insert.run({ symbol, date, ny_time: r.ny_time, buy_volume: r.buy_volume, sell_volume: r.sell_volume })))(rows);
+}
+
+export function getTickVolumeDays(symbol, from, to) {
+  return getDb().prepare(`
+    SELECT DISTINCT date FROM tick_volume_1m WHERE symbol = ? AND date >= ? AND date <= ?
+  `).all(symbol, from, to).map(r => r.date);
+}
+
+export function getTickVolume1m(symbol, from, to) {
+  return getDb().prepare(`
+    SELECT * FROM tick_volume_1m WHERE symbol = ? AND date >= ? AND date <= ? ORDER BY date ASC, ny_time ASC
+  `).all(symbol, from, to);
+}
+
 // Mean-reversion backtest
 export function saveMRRun(run) {
   const result = getDb().prepare(`
@@ -563,6 +648,57 @@ export function getMRSweep(sweepId) {
 
 export function getORBSweep(sweepId) {
   return getDb().prepare('SELECT * FROM orb_backtest_runs WHERE sweep_id = ? ORDER BY oos_sharpe DESC').all(sweepId);
+}
+
+// Gap-fill backtest (same shape as ORB's, separate tables so its runs don't
+// mix into the ORB Lab's history)
+export function saveGapFillRun(run) {
+  const result = getDb().prepare(`
+    INSERT INTO gap_fill_backtest_runs
+      (symbol, date_from, date_to, timeframe, sweep_id,
+       total_trades, win_rate, total_return_pct, avg_trade_return_pct, sharpe, profit_factor, max_drawdown_pct,
+       is_trades, is_win_rate, is_return_pct, is_sharpe, is_profit_factor,
+       oos_trades, oos_win_rate, oos_return_pct, oos_sharpe, oos_profit_factor,
+       params, metrics)
+    VALUES
+      (@symbol, @date_from, @date_to, @timeframe, @sweep_id,
+       @total_trades, @win_rate, @total_return_pct, @avg_trade_return_pct, @sharpe, @profit_factor, @max_drawdown_pct,
+       @is_trades, @is_win_rate, @is_return_pct, @is_sharpe, @is_profit_factor,
+       @oos_trades, @oos_win_rate, @oos_return_pct, @oos_sharpe, @oos_profit_factor,
+       @params, @metrics)
+  `).run(run);
+  return result.lastInsertRowid;
+}
+
+export function saveGapFillTrades(trades) {
+  const db = getDb();
+  const insert = db.prepare(`
+    INSERT INTO gap_fill_backtest_trades
+      (run_id, trade_date, entry_time, signal, entry_price, target_price, stop_price,
+       exit_price, exit_result, bars_held, gap_pct, gross_return_pct,
+       return_pct, pnl_dollars, regime_trend, sample)
+    VALUES
+      (@run_id, @trade_date, @entry_time, @signal, @entry_price, @target_price, @stop_price,
+       @exit_price, @exit_result, @bars_held, @gap_pct, @gross_return_pct,
+       @return_pct, @pnl_dollars, @regime_trend, @sample)
+  `);
+  db.transaction((t) => t.forEach(r => insert.run(r)))(trades);
+}
+
+export function getGapFillRuns() {
+  return getDb().prepare('SELECT * FROM gap_fill_backtest_runs ORDER BY run_at DESC, id DESC LIMIT 50').all();
+}
+
+export function getGapFillRun(runId) {
+  return getDb().prepare('SELECT * FROM gap_fill_backtest_runs WHERE id = ?').get(runId);
+}
+
+export function getGapFillTrades(runId) {
+  return getDb().prepare('SELECT * FROM gap_fill_backtest_trades WHERE run_id = ? ORDER BY trade_date ASC, entry_time ASC').all(runId);
+}
+
+export function getGapFillSweep(sweepId) {
+  return getDb().prepare('SELECT * FROM gap_fill_backtest_runs WHERE sweep_id = ? ORDER BY oos_sharpe DESC').all(sweepId);
 }
 
 // S&D backtest

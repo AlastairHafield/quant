@@ -1,12 +1,12 @@
 import { addDays, parseISO, format } from 'date-fns';
-import { sma, atr, adx, percentileRank } from './indicators.js';
-// NOTE: db.js (native better-sqlite3) and the Yahoo fetchers are pulled in via
-// dynamic import inside the async data-loading paths only, so the pure engine
-// (backtestCore / sizeTrades / computeORBMetrics / buildRegimeMap) can be imported
-// and swept without loading any native addon.
-
-const DEFAULT_ACCOUNT = 100_000;
-const IS_SPLIT = 0.70; // first 70% of trading days = in-sample
+import { atr } from './indicators.js';
+import { loadAllData, buildRegimeMap } from './marketData.js';
+import { DEFAULT_ACCOUNT, sizeTrades, computeBacktestMetrics, dataCoverage, round, dowOf } from './backtestMetrics.js';
+import { regimeRobustnessCheck, monteCarloDrawdown, deflatedSharpe, runWalkForward } from './robustness.js';
+// NOTE: db.js (native better-sqlite3) is pulled in via dynamic import inside
+// data/db.js access paths (routes.js et al) only, so the pure engine
+// (backtestCore / sizeTrades / computeORBMetrics) can be imported and swept
+// without loading any native addon.
 
 // Opening-Range Breakout defaults. An ORB session:
 //   1. build the Opening Range (OR) from the first `orBars` 15m bars of RTH
@@ -57,105 +57,19 @@ export const ORB_DEFAULTS = {
   // Session VWAP alignment filter (no lookahead — cumulative from RTH open through "now")
   vwapMode: 'OFF',          // OFF | ALIGN (entry price must be beyond VWAP in the trade's direction)
   atrPeriod: 14,            // bars; scale this up when timeframe is finer than 15m for a comparable window
+  // Session window (NY HHMM) bars are filtered to before anything else runs — the OR
+  // is built from the first `orBars` bars *after* sessionStartET, and a position still
+  // open at sessionEndET is always flattened there (same "flat by session end" rule
+  // that applies to RTH, just parameterized). Defaults are RTH so every existing
+  // symbol/timeframe combo behaves identically; only a non-RTH data source (e.g. a
+  // near-24hr futures feed) would ever override these.
+  sessionStartET: 930,
+  sessionEndET: 1600,
 };
 
-// ─── Data loading (mirrors mrBacktest) ───────────────────────────────────────
-
-// Dispatches on `timeframe` — this used to be hardcoded to 15m regardless of what
-// was requested, so 5m/1m sweeps silently ran on 15m data. Now actually wired up.
-async function loadIntradayBars(symbol, fetchFrom, dateTo, apiKey, timeframe = '15m') {
-  if (timeframe === '1m') return loadAlpaca1mBars(symbol, fetchFrom, dateTo);
-
-  const { getBars15m, getBars5m, upsertBars15m, upsertBars5m } = await import('../data/db.js');
-  const { get15mBars } = await import('../api/intraday.js');
-  const getCached = timeframe === '5m' ? getBars5m : getBars15m;
-  const upsertCached = timeframe === '5m' ? upsertBars5m : upsertBars15m;
-
-  let bars = getCached(symbol, fetchFrom, dateTo);
-  const cachedMin = bars[0]?.date;
-  const cachedMax = bars[bars.length - 1]?.date;
-  const cacheStale = bars.length === 0 || cachedMin > fetchFrom || cachedMax < dateTo;
-  if (cacheStale) {
-    console.log(`Fetching ${timeframe} data for ${symbol} (${fetchFrom} to ${dateTo})...`);
-    const fresh = await get15mBars(symbol, fetchFrom, dateTo, apiKey, timeframe);
-    if (fresh.length > 0) {
-      upsertCached(fresh);
-      bars = getCached(symbol, fetchFrom, dateTo);
-    }
-  }
-  return bars;
-}
-
-async function loadAlpaca1mBars(symbol, fetchFrom, dateTo) {
-  const { getBars1m, upsertBars1m } = await import('../data/db.js');
-  const { getAlpacaBars } = await import('../api/alpaca.js');
-  let bars = getBars1m(symbol, fetchFrom, dateTo);
-  const cachedMin = bars[0]?.date;
-  const cachedMax = bars[bars.length - 1]?.date;
-  const cacheStale = bars.length === 0 || cachedMin > fetchFrom || cachedMax < dateTo;
-  if (cacheStale) {
-    console.log(`Fetching 1m data for ${symbol} (${fetchFrom} to ${dateTo}) from Alpaca...`);
-    const fresh = await getAlpacaBars(symbol, fetchFrom, dateTo, { timeframe: '1Min' });
-    if (fresh.length > 0) {
-      upsertBars1m(fresh);
-      bars = getBars1m(symbol, fetchFrom, dateTo);
-    }
-  }
-  return bars;
-}
-
-async function loadDaily(symbol, warmupFrom, dateTo) {
-  const { getPrices, upsertPrices } = await import('../data/db.js');
-  const { getHistoricalOHLCV } = await import('../api/prices.js');
-  let daily = getPrices(symbol, warmupFrom, dateTo);
-  const firstCached = daily[0]?.date;
-  const lastCached = daily[daily.length - 1]?.date;
-  const staleTail = format(addDays(parseISO(dateTo), -7), 'yyyy-MM-dd');
-  // A cache that starts well after warmupFrom is missing early history — this used to
-  // go unnoticed because only the tail was checked, silently starving the regime map
-  // (buildRegimeMap) of prior-day data for the whole gap, which makes passesDayFilters
-  // treat those days as unfiltered (reg == null → filters bypassed) instead of erroring.
-  const staleHead = format(addDays(parseISO(warmupFrom), 7), 'yyyy-MM-dd');
-  const cacheStale = daily.length < 60 || !lastCached || lastCached < staleTail || !firstCached || firstCached > staleHead;
-  if (cacheStale) {
-    const fresh = await getHistoricalOHLCV(symbol, warmupFrom, dateTo);
-    if (fresh.length > 0) {
-      upsertPrices(fresh);
-      daily = getPrices(symbol, warmupFrom, dateTo);
-    }
-  }
-  return daily;
-}
-
-// Regime for each trading day from the PRIOR day's daily bar (no lookahead).
-export function buildRegimeMap(dailyBars, vixBars) {
-  const closes = dailyBars.map(b => b.close);
-  const sma20 = sma(closes, 20);
-  const sma50 = sma(closes, 50);
-  const adx14 = adx(dailyBars, 14);
-  const atr14 = atr(dailyBars, 14);
-
-  const vixByDate = {};
-  for (const v of vixBars) vixByDate[v.date] = v.close;
-
-  const regime = {};
-  for (let i = 1; i < dailyBars.length; i++) {
-    const p = i - 1;
-    let trend = 'FLAT';
-    if (sma20[p] != null && sma50[p] != null) {
-      if (closes[p] > sma20[p] && sma20[p] > sma50[p]) trend = 'UP';
-      else if (closes[p] < sma20[p] && sma20[p] < sma50[p]) trend = 'DOWN';
-    }
-    regime[dailyBars[i].date] = {
-      trend,
-      adx: adx14[p],
-      atrPctile: atr14[p] != null ? percentileRank(atr14, p, 100) : null,
-      vix: vixByDate[dailyBars[p].date] ?? null,
-      prevClose: closes[p],
-    };
-  }
-  return regime;
-}
+// Intraday/daily/regime data loading now lives in marketData.js (shared with
+// gapFillBacktest.js and any future engine) — loadAllData/buildRegimeMap
+// imported at the top of this file.
 
 function passesDayFilters(reg, dowChar, params) {
   if (params.dowMask !== 'ALL' && !params.dowMask.includes(dowChar)) return false;
@@ -190,15 +104,16 @@ function allowedByTrend(signal, reg, params) {
 // Day grouping + VWAP are param-independent; ATR depends on atrPeriod (which
 // normally isn't swept, but matters when comparing timeframes — e.g. ATR(14) on
 // 1m bars is a 14-minute window, not comparable to ATR(14) on 15m bars). Cache
-// keyed on (bars array identity, atrPeriod) so a sweep still hits the cache.
+// keyed on (bars array identity, atrPeriod, session window) so a sweep still hits the cache.
 const ctxCache = new WeakMap();
-function getContext(allBars, atrPeriod = 14) {
-  let byPeriod = ctxCache.get(allBars);
-  if (!byPeriod) { byPeriod = new Map(); ctxCache.set(allBars, byPeriod); }
-  let ctx = byPeriod.get(atrPeriod);
+function getContext(allBars, atrPeriod = 14, sessionStartET = 930, sessionEndET = 1600) {
+  let byKey = ctxCache.get(allBars);
+  if (!byKey) { byKey = new Map(); ctxCache.set(allBars, byKey); }
+  const cacheKey = `${atrPeriod}|${sessionStartET}|${sessionEndET}`;
+  let ctx = byKey.get(cacheKey);
   if (ctx) return ctx;
 
-  const bars = allBars.filter(b => b.ny_time >= 930 && b.ny_time < 1600);
+  const bars = allBars.filter(b => b.ny_time >= sessionStartET && b.ny_time < sessionEndET);
   const atrArr = atr(bars, atrPeriod);
   const globalIdx = new Map(bars.map((b, i) => [b.utc_datetime, i]));
   const byDate = {};
@@ -220,11 +135,10 @@ function getContext(allBars, atrPeriod = 14) {
   }
 
   ctx = { bars, atrArr, globalIdx, byDate, sortedDates, vwapArr };
-  byPeriod.set(atrPeriod, ctx);
+  byKey.set(cacheKey, ctx);
   return ctx;
 }
 
-const DOW = ['U', 'M', 'T', 'W', 'R', 'F', 'S']; // getUTCDay(): 0=Sun..6=Sat
 
 // ─── Core backtest (pure) ────────────────────────────────────────────────────
 
@@ -235,9 +149,10 @@ export function backtestCore(allBars, regimeMap, rawParams) {
     stopMode, stopParam, targetMode, targetParam,
     timeStopBars, maxTradesPerDay, entryCutoff,
     minORRangePct, maxORRangePct, volMult, gapMode, gapMinPct,
+    sessionStartET, sessionEndET,
   } = params;
 
-  const { atrArr, globalIdx, byDate, sortedDates, vwapArr } = getContext(allBars, params.atrPeriod);
+  const { atrArr, globalIdx, byDate, sortedDates, vwapArr } = getContext(allBars, params.atrPeriod, sessionStartET, sessionEndET);
   const trades = [];
   let tradedDays = 0, filteredDays = 0;
 
@@ -246,7 +161,7 @@ export function backtestCore(allBars, regimeMap, rawParams) {
     const dayBars = byDate[today];
     if (!dayBars || dayBars.length < orBars + 2) continue; // need OR + room to trade
 
-    const dowChar = DOW[parseISO(today).getUTCDay()];
+    const dowChar = dowOf(today);
     const reg = regimeMap[today] || null;
     if (!passesDayFilters(reg, dowChar, params)) { filteredDays++; continue; }
 
@@ -469,129 +384,23 @@ function closeTrade(trades, pos, exit, today, reg, params, gapPct) {
   });
 }
 
-// ─── Position sizing (identical model to mrBacktest) ─────────────────────────
+// ─── Metrics (ORB-specific groupings on top of the shared full/IS/OOS/byDow/byExit) ──
 
-export function sizeTrades(trades, params) {
-  const { sizingMode, positionPct, riskPct, compound, maxLeverage } = { ...ORB_DEFAULTS, ...params };
-  const accountSize = params.accountSize || DEFAULT_ACCOUNT;
-  let equity = accountSize;
-  return trades.map(t => {
-    const base = compound ? equity : accountSize;
-    let pnl;
-    if (sizingMode === 'RISK') {
-      const stopDist = Math.abs(t.entry_price - t.stop_price);
-      let shares = stopDist > 0 ? (base * riskPct) / stopDist : 0;
-      // Optional leverage cap so a very tight stop can't imply an un-executable position.
-      if (maxLeverage > 0 && shares * t.entry_price > maxLeverage * base) {
-        shares = (maxLeverage * base) / t.entry_price;
-      }
-      pnl = shares * t.entry_price * (t.return_pct / 100);
-    } else {
-      pnl = base * positionPct * (t.return_pct / 100);
-    }
-    pnl = round(pnl);
-    equity += pnl;
-    return { ...t, pnl_dollars: pnl };
+function computeORBMetrics(trades, sortedTradeDates, params = {}) {
+  const metrics = computeBacktestMetrics(trades, sortedTradeDates, params, {
+    byTrend: t => t.regime_trend,
+    byHour: t => String(Math.floor(t.entry_time / 100)).padStart(2, '0') + ':00',
+    bySignal: t => t.signal,
   });
-}
-
-// ─── Metrics ─────────────────────────────────────────────────────────────────
-
-function metricSet(trades, accountSize = DEFAULT_ACCOUNT) {
-  if (trades.length === 0) {
-    return { totalTrades: 0, wins: 0, losses: 0, winRate: 0, avgTradeReturnPct: 0, totalReturnPct: 0,
-             totalPnlDollars: 0, sharpe: 0, profitFactor: 0, expectancy: 0, avgWinPct: 0, avgLossPct: 0,
-             maxDrawdownPct: 0, targetHits: 0, stopHits: 0, timeExits: 0, eodExits: 0 };
-  }
-  const returns = trades.map(t => t.return_pct);
-  const wins = returns.filter(r => r > 0);
-  const losses = returns.filter(r => r <= 0);
-  const totalPnl = trades.reduce((s, t) => s + t.pnl_dollars, 0);
-  const grossWin = trades.filter(t => t.pnl_dollars > 0).reduce((s, t) => s + t.pnl_dollars, 0);
-  const grossLoss = Math.abs(trades.filter(t => t.pnl_dollars < 0).reduce((s, t) => s + t.pnl_dollars, 0));
-  const avgReturn = returns.reduce((a, b) => a + b, 0) / returns.length;
-  const std = stdDev(returns);
-
-  let equity = accountSize, peak = accountSize, maxDD = 0;
-  for (const t of trades) {
-    equity += t.pnl_dollars;
-    if (equity > peak) peak = equity;
-    const dd = ((peak - equity) / peak) * 100;
-    if (dd > maxDD) maxDD = dd;
-  }
-
-  return {
-    totalTrades: trades.length,
-    wins: wins.length,
-    losses: losses.length,
-    winRate: round((wins.length / returns.length) * 100),
-    avgTradeReturnPct: round(avgReturn),
-    totalReturnPct: round((totalPnl / accountSize) * 100),
-    totalPnlDollars: round(totalPnl),
-    sharpe: round(std > 0 ? (avgReturn / std) * Math.sqrt(252) : 0),
-    profitFactor: round(grossLoss > 0 ? grossWin / grossLoss : (grossWin > 0 ? 99 : 0)),
-    expectancy: round(totalPnl / trades.length),
-    avgWinPct: round(wins.length ? wins.reduce((a, b) => a + b, 0) / wins.length : 0),
-    avgLossPct: round(losses.length ? losses.reduce((a, b) => a + b, 0) / losses.length : 0),
-    maxDrawdownPct: round(maxDD),
-    targetHits: trades.filter(t => t.exit_result === 'TARGET').length,
-    stopHits: trades.filter(t => t.exit_result === 'STOP').length,
-    timeExits: trades.filter(t => t.exit_result === 'TIME').length,
-    eodExits: trades.filter(t => t.exit_result === 'EOD').length,
-  };
-}
-
-function groupMetrics(trades, keyFn) {
-  const groups = {};
-  for (const t of trades) (groups[keyFn(t)] ||= []).push(t);
-  const out = {};
-  for (const k of Object.keys(groups).sort()) {
-    const g = groups[k];
-    const returns = g.map(t => t.return_pct);
-    out[k] = {
-      trades: g.length,
-      winRate: round((returns.filter(r => r > 0).length / g.length) * 100),
-      avgReturnPct: round(returns.reduce((a, b) => a + b, 0) / g.length),
-      totalPnl: round(g.reduce((s, t) => s + (t.pnl_dollars || 0), 0)),
-    };
-  }
-  return out;
-}
-
-const DOW_LABEL = { M: 'Mon', T: 'Tue', W: 'Wed', R: 'Thu', F: 'Fri' };
-
-export function computeORBMetrics(trades, sortedTradeDates, params = {}) {
-  const accountSize = params.accountSize || DEFAULT_ACCOUNT;
-  const splitIdx = Math.floor(sortedTradeDates.length * IS_SPLIT);
-  const splitDate = sortedTradeDates[splitIdx] || '9999-12-31';
-  for (const t of trades) t.sample = t.trade_date < splitDate ? 'IS' : 'OOS';
-
-  const full = metricSet(trades, accountSize);
-  const is = metricSet(sizeTrades(trades.filter(t => t.sample === 'IS'), params), accountSize);
-  const oos = metricSet(sizeTrades(trades.filter(t => t.sample === 'OOS'), params), accountSize);
-
-  return {
-    full, is, oos, splitDate,
-    byTrend: groupMetrics(trades, t => t.regime_trend),
-    byHour: groupMetrics(trades, t => String(Math.floor(t.entry_time / 100)).padStart(2, '0') + ':00'),
-    bySignal: groupMetrics(trades, t => t.signal),
-    byDow: groupMetrics(trades, t => DOW_LABEL[DOW[parseISO(t.trade_date).getUTCDay()]] || '?'),
-    byExit: groupMetrics(trades, t => t.exit_result),
-  };
+  // trades here are already sized (pnl_dollars present) — see runOne below.
+  metrics.regimeRobustness = regimeRobustnessCheck(trades, t => t.regime_trend);
+  metrics.monteCarlo = trades.length >= 20
+    ? monteCarloDrawdown(trades, params.accountSize || DEFAULT_ACCOUNT)
+    : null;
+  return metrics;
 }
 
 // ─── Data-driven entry points ────────────────────────────────────────────────
-
-async function loadAllData(symbol, dateFrom, dateTo, params = {}) {
-  const fetchFrom = format(addDays(parseISO(dateFrom), -7), 'yyyy-MM-dd');
-  const warmupFrom = format(addDays(parseISO(dateFrom), -300), 'yyyy-MM-dd');
-  const [bars, daily, vix] = await Promise.all([
-    loadIntradayBars(symbol, fetchFrom, dateTo, params.apiKey, params.timeframe),
-    loadDaily(symbol, warmupFrom, dateTo),
-    loadDaily('^VIX', warmupFrom, dateTo),
-  ]);
-  return { bars, regimeMap: buildRegimeMap(daily, vix) };
-}
 
 export async function runORBBacktest(symbol, dateFrom, dateTo, params = {}) {
   const { bars, regimeMap } = await loadAllData(symbol, dateFrom, dateTo, params);
@@ -661,24 +470,34 @@ export async function runORBSweep(symbol, dateFrom, dateTo, baseParams = {}, gri
     });
   }
   results.sort((a, b) => (b.oosSharpe ?? -999) - (a.oosSharpe ?? -999));
-  return { sweepId, comboCount: combos.length, gridKeys, results, ...coverage };
+
+  // Deflated Sharpe for the winner only — the naive best-of-N OOS Sharpe above
+  // is biased upward exactly because N combos were tried; this haircuts it
+  // for that selection effect. Computed on the winner's own OOS trades, not
+  // held in memory for every combo during the loop above.
+  let deflatedSharpeOfTop = null;
+  if (results[0]?.runId != null) {
+    const { getORBTrades } = await import('../data/db.js');
+    const oosReturns = getORBTrades(results[0].runId)
+      .filter(t => t.sample === 'OOS')
+      .map(t => t.return_pct);
+    deflatedSharpeOfTop = deflatedSharpe(oosReturns, combos.length);
+  }
+
+  return { sweepId, comboCount: combos.length, gridKeys, results, deflatedSharpeOfTop, ...coverage };
 }
 
-// ─── Helpers ─────────────────────────────────────────────────────────────────
+// ─── Walk-forward validation ─────────────────────────────────────────────────
 
-function dataCoverage(bars, dateFrom, dateTo) {
-  const inRange = bars.filter(b => b.date >= dateFrom && b.date <= dateTo);
-  if (inRange.length === 0) return { dataFrom: null, dataTo: null, coverageNote: 'No bars inside the requested range.' };
-  const dataFrom = inRange[0].date, dataTo = inRange[inRange.length - 1].date;
-  const gapDays = Math.round((parseISO(dataFrom) - parseISO(dateFrom)) / 86400000);
-  const coverageNote = gapDays > 7
-    ? `Data only from ${dataFrom} (requested ${dateFrom}). Results cover ${dataFrom} → ${dataTo}.` : null;
-  return { dataFrom, dataTo, coverageNote };
+export async function runORBWalkForward(symbol, dateFrom, dateTo, baseParams = {}, grid = {}, numFolds = 4) {
+  const { bars, regimeMap } = await loadAllData(symbol, dateFrom, dateTo, baseParams);
+  if (bars.length === 0) return { error: `No ${baseParams.timeframe || '15m'} data available for ${symbol}.` };
+  const coverage = dataCoverage(bars, dateFrom, dateTo);
+  const result = runWalkForward({
+    coreFn: backtestCore, bars, regimeMap, baseParams, grid, dateFrom, dateTo, numFolds,
+    accountSize: baseParams.accountSize,
+  });
+  if (result.error) return result;
+  return { ...result, ...coverage };
 }
 
-function stdDev(values) {
-  const mean = values.reduce((a, b) => a + b, 0) / values.length;
-  return Math.sqrt(values.reduce((s, v) => s + Math.pow(v - mean, 2), 0) / values.length);
-}
-
-function round(n) { return Math.round(n * 10000) / 10000; }

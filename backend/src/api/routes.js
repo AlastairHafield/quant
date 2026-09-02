@@ -4,9 +4,10 @@ import { loadEarningsAndSignals } from '../engine/signals.js';
 import { runBacktest } from '../engine/backtest.js';
 import { runSDBacktest } from '../engine/sdBacktest.js';
 import { runMRBacktest, runMRSweep } from '../engine/mrBacktest.js';
-import { runORBBacktest, runORBSweep } from '../engine/orbBacktest.js';
+import { runORBBacktest, runORBSweep, runORBWalkForward } from '../engine/orbBacktest.js';
+import { runGapFillBacktest, runGapFillSweep, runGapFillWalkForward } from '../engine/gapFillBacktest.js';
 import { parsePineScriptParams } from '../engine/parsePineScript.js';
-import { getBacktestRuns, getBacktestTrades, getEarningsEvents, removeStock, getSDRuns, getSDTrades, getMRRuns, getMRRun, getMRTrades, getMRSweep, getORBRuns, getORBRun, getORBTrades, getORBSweep } from '../data/db.js';
+import { getBacktestRuns, getBacktestTrades, getEarningsEvents, removeStock, getSDRuns, getSDTrades, getMRRuns, getMRRun, getMRTrades, getMRSweep, getORBRuns, getORBRun, getORBTrades, getORBSweep, getGapFillRuns, getGapFillRun, getGapFillTrades, getGapFillSweep } from '../data/db.js';
 import { setGexBreakoutStatus, getGexBreakoutStatus } from '../data/gexBreakoutStatus.js';
 import { setMechanicalOrbStatus, getMechanicalOrbStatus } from '../data/mechanicalOrbStatus.js';
 import { setGapContinuationStatus, getGapContinuationStatus } from '../data/gapContinuationStatus.js';
@@ -324,6 +325,112 @@ router.get('/orb/backtest/runs/:id/trades', (req, res) => {
 router.get('/orb/sweeps/:sweepId', (req, res) => {
   try {
     res.json({ success: true, data: getORBSweep(req.params.sweepId) });
+  } catch (e) {
+    res.status(500).json({ success: false, error: e.message });
+  }
+});
+
+router.post('/orb/walkforward/run', async (req, res) => {
+  const { symbol, dateFrom, dateTo, baseParams, grid, numFolds } = req.body;
+  if (!symbol || !dateFrom || !dateTo) {
+    return res.status(400).json({ success: false, error: 'symbol, dateFrom, and dateTo are required' });
+  }
+  try {
+    const result = await runORBWalkForward(symbol.toUpperCase(), dateFrom, dateTo, {
+      ...(baseParams || {}),
+      apiKey: process.env.FMP_API_KEY || null,
+    }, grid || {}, numFolds || 4);
+    if (result.error) return res.json({ success: false, error: result.error });
+    res.json({ success: true, data: result });
+  } catch (e) {
+    console.error('ORB walk-forward failed:', e);
+    res.status(500).json({ success: false, error: e.message });
+  }
+});
+
+// === GAP FILL / OVERNIGHT GAP BACKTEST (same shape as ORB above) ===
+
+router.post('/gapfill/backtest/run', async (req, res) => {
+  const { symbol, dateFrom, dateTo, ...params } = req.body;
+  if (!symbol || !dateFrom || !dateTo) {
+    return res.status(400).json({ success: false, error: 'symbol, dateFrom, and dateTo are required' });
+  }
+  try {
+    const result = await runGapFillBacktest(symbol.toUpperCase(), dateFrom, dateTo, {
+      ...params,
+      apiKey: process.env.FMP_API_KEY || null,
+    });
+    if (result.error) return res.json({ success: false, error: result.error });
+    res.json({ success: true, data: result });
+  } catch (e) {
+    console.error('Gap-fill backtest failed:', e);
+    res.status(500).json({ success: false, error: e.message });
+  }
+});
+
+router.post('/gapfill/sweep/run', async (req, res) => {
+  const { symbol, dateFrom, dateTo, baseParams, grid } = req.body;
+  if (!symbol || !dateFrom || !dateTo) {
+    return res.status(400).json({ success: false, error: 'symbol, dateFrom, and dateTo are required' });
+  }
+  try {
+    const result = await runGapFillSweep(symbol.toUpperCase(), dateFrom, dateTo, {
+      ...(baseParams || {}),
+      apiKey: process.env.FMP_API_KEY || null,
+    }, grid || {});
+    if (result.error) return res.json({ success: false, error: result.error });
+    res.json({ success: true, data: result });
+  } catch (e) {
+    console.error('Gap-fill sweep failed:', e);
+    res.status(500).json({ success: false, error: e.message });
+  }
+});
+
+router.post('/gapfill/walkforward/run', async (req, res) => {
+  const { symbol, dateFrom, dateTo, baseParams, grid, numFolds } = req.body;
+  if (!symbol || !dateFrom || !dateTo) {
+    return res.status(400).json({ success: false, error: 'symbol, dateFrom, and dateTo are required' });
+  }
+  try {
+    const result = await runGapFillWalkForward(symbol.toUpperCase(), dateFrom, dateTo, {
+      ...(baseParams || {}),
+      apiKey: process.env.FMP_API_KEY || null,
+    }, grid || {}, numFolds || 4);
+    if (result.error) return res.json({ success: false, error: result.error });
+    res.json({ success: true, data: result });
+  } catch (e) {
+    console.error('Gap-fill walk-forward failed:', e);
+    res.status(500).json({ success: false, error: e.message });
+  }
+});
+
+router.get('/gapfill/backtest/runs', (req, res) => {
+  try {
+    res.json({ success: true, data: getGapFillRuns() });
+  } catch (e) {
+    res.status(500).json({ success: false, error: e.message });
+  }
+});
+
+router.get('/gapfill/backtest/runs/:id', (req, res) => {
+  try {
+    res.json({ success: true, data: getGapFillRun(parseInt(req.params.id)) });
+  } catch (e) {
+    res.status(500).json({ success: false, error: e.message });
+  }
+});
+
+router.get('/gapfill/backtest/runs/:id/trades', (req, res) => {
+  try {
+    res.json({ success: true, data: getGapFillTrades(parseInt(req.params.id)) });
+  } catch (e) {
+    res.status(500).json({ success: false, error: e.message });
+  }
+});
+
+router.get('/gapfill/sweeps/:sweepId', (req, res) => {
+  try {
+    res.json({ success: true, data: getGapFillSweep(req.params.sweepId) });
   } catch (e) {
     res.status(500).json({ success: false, error: e.message });
   }
