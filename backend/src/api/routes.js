@@ -15,6 +15,7 @@ import { fetchTrades, fetchExitActions, fetchDailySummaries, fetchLedgerTrades, 
 import { summarizeLiveTrades, computeLiveVsBacktestDrift } from '../engine/reconciliation.js';
 import { evaluatePromotionGate } from '../engine/promotionGate.js';
 import { describePromotionAction } from '../engine/promotionAction.js';
+import { logAuditEntry, fetchAuditLog } from '../data/agentAuditLog.js';
 
 const router = express.Router();
 
@@ -615,6 +616,33 @@ router.post('/promotion-gate/action', (req, res) => {
   }
   try {
     res.json({ success: true, data: describePromotionAction(strategy, gateResult) });
+  } catch (e) {
+    res.status(500).json({ success: false, error: e.message });
+  }
+});
+
+// === AGENT HARNESS AUDIT LOG (Phase 5) ===
+
+router.post('/agent-harness/audit-log', async (req, res) => {
+  if (!req.body?.type || !req.body?.strategy) {
+    return res.status(400).json({ success: false, error: 'type and strategy are required' });
+  }
+  try {
+    const entry = await logAuditEntry(req.body);
+    res.json({ success: true, data: entry });
+  } catch (e) {
+    res.status(500).json({ success: false, error: e.message });
+  }
+});
+
+router.get('/agent-harness/audit-log', async (req, res) => {
+  try {
+    const entries = await fetchAuditLog({
+      strategy: req.query.strategy || undefined,
+      type: req.query.type || undefined,
+      limit: req.query.limit ? parseInt(req.query.limit) : undefined,
+    });
+    res.json({ success: true, data: entries });
   } catch (e) {
     res.status(500).json({ success: false, error: e.message });
   }
