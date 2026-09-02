@@ -184,6 +184,30 @@ export async function fetchHistoricalBars(symbolText, { fromDate, toDate }) {
   });
 }
 
+// Completed daily bars only (includePartialBar: false), sorted ascending (oldest
+// first) so the last element is "yesterday" and adx()'s day-over-day math runs
+// forward in time — same as gap-continuation/mechanical-orb's identical
+// fetchDailyBars. lookbackDays is calendar days, so pad well past 2x adxPeriod
+// to survive weekends/holidays.
+export async function fetchDailyBars(symbolText, lookbackCalendarDays) {
+  const contractId = await resolveFrontMonthContractId(symbolText);
+  const now = new Date();
+  const start = new Date(now.getTime() - lookbackCalendarDays * 24 * 60 * 60_000);
+  const data = await apiPost("/api/History/retrieveBars", {
+    contractId,
+    live: false,
+    startTime: start.toISOString(),
+    endTime: now.toISOString(),
+    unit: 4, // Day
+    unitNumber: 1,
+    limit: lookbackCalendarDays,
+    includePartialBar: false,
+  });
+  return (data.bars ?? [])
+    .map((b) => ({ high: b.h, low: b.l, close: b.c, timestamp: b.t }))
+    .sort((a, b) => new Date(a.timestamp) - new Date(b.timestamp));
+}
+
 export async function fetchLastPrice(symbolText) {
   const contractId = await resolveFrontMonthContractId(symbolText);
   const now = new Date();
