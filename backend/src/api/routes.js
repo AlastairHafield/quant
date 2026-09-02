@@ -13,6 +13,8 @@ import { setMechanicalOrbStatus, getMechanicalOrbStatus } from '../data/mechanic
 import { setGapContinuationStatus, getGapContinuationStatus } from '../data/gapContinuationStatus.js';
 import { fetchTrades, fetchExitActions, fetchDailySummaries, fetchLedgerTrades, fetchDailyLedger } from '../data/tradeJournalMongo.js';
 import { summarizeLiveTrades, computeLiveVsBacktestDrift } from '../engine/reconciliation.js';
+import { evaluatePromotionGate } from '../engine/promotionGate.js';
+import { describePromotionAction } from '../engine/promotionAction.js';
 
 const router = express.Router();
 
@@ -581,6 +583,38 @@ router.post('/reconciliation/run', async (req, res) => {
     const liveStats = summarizeLiveTrades(liveTrades);
     const drift = computeLiveVsBacktestDrift(liveStats, backtestStats, tolerances || {});
     res.json({ success: true, data: { system, closedFrom, closedTo, liveStats, backtestStats, ...drift } });
+  } catch (e) {
+    res.status(500).json({ success: false, error: e.message });
+  }
+});
+
+// === PROMOTION GATE (Phase 4) ===
+// Pure decision, no side effects — does NOT flip anything live itself. Feed
+// it walkForward (POST .../walkforward/run's data), regime
+// (metrics.regimeRobustness from a backtest run), deflated
+// (a sweep's deflatedSharpeOfTop), and shadowDays (an array of
+// { dayKey, drift } built from repeated /reconciliation/run calls, one per
+// consecutive practice-account trading day).
+router.post('/promotion-gate/evaluate', (req, res) => {
+  const { walkForward, regime, deflated, shadowDays, criteria } = req.body;
+  try {
+    const result = evaluatePromotionGate({ walkForward, regime, deflated, shadowDays }, criteria || {});
+    res.json({ success: true, data: result });
+  } catch (e) {
+    res.status(500).json({ success: false, error: e.message });
+  }
+});
+
+// Generates (never executes) the exact command to flip a strategy live once
+// its promotion gate has approved — see promotionAction.js's own comment on
+// why this stops short of running it itself.
+router.post('/promotion-gate/action', (req, res) => {
+  const { strategy, gateResult } = req.body;
+  if (!strategy || !gateResult) {
+    return res.status(400).json({ success: false, error: 'strategy and gateResult are required' });
+  }
+  try {
+    res.json({ success: true, data: describePromotionAction(strategy, gateResult) });
   } catch (e) {
     res.status(500).json({ success: false, error: e.message });
   }

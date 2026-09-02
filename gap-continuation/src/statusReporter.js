@@ -3,6 +3,7 @@ import { CONFIG } from "./config.js";
 export function buildStatusPayload(worker) {
   return {
     signalOnly: !CONFIG.executionEnabled,
+    accountMode: CONFIG.accountMode,
     instrument: CONFIG.instrument,
     priorClose: worker.priorClose,
     adx: worker.priorDayAdx,

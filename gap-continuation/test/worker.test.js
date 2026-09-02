@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { createWorker, shouldFlushLogNow, findUntrackedPosition } from "../src/worker.js";
+import { createWorker, shouldFlushLogNow, findUntrackedPosition, accountNameHintFor } from "../src/worker.js";
 import { CONFIG } from "../src/config.js";
 
 function bar(open, high, low, close) {
@@ -243,4 +243,30 @@ test("shouldFlushLogNow: returns the day-key at/after the scheduled time", () =>
   const flushET = { h: 16, m: 5 };
   const t = new Date(2026, 6, 27, 16, 10);
   assert.equal(shouldFlushLogNow(t, flushET), t.toDateString());
+});
+
+test("accountNameHintFor: live mode defers to resolveAccountId's own env-var default", () => {
+  assert.equal(accountNameHintFor({ accountMode: "live", practiceAccountNameHint: "PRAC-123" }), undefined);
+});
+
+test("accountNameHintFor: practice mode resolves the practice account hint", () => {
+  assert.equal(accountNameHintFor({ accountMode: "practice", practiceAccountNameHint: "PRAC-123" }), "PRAC-123");
+});
+
+test("checkAccountRisk: the account-wide $ daily loss cap does not apply in practice mode", async () => {
+  const worker = createWorker();
+  const originalCap = CONFIG.risk.dailyLossCapDollars;
+  const originalMode = CONFIG.accountMode;
+  CONFIG.risk.dailyLossCapDollars = 500;
+  CONFIG.accountMode = "practice";
+  try {
+    worker.account = { balance: 50000 };
+    await worker.checkAccountRisk(new Date(2026, 6, 27, 10, 0));
+    worker.account = { balance: 40000 }; // down $10,000 — would trip live mode's $500 cap
+    await worker.checkAccountRisk(new Date(2026, 6, 27, 10, 5));
+    assert.equal(worker.haltedForRisk, false);
+  } finally {
+    CONFIG.risk.dailyLossCapDollars = originalCap;
+    CONFIG.accountMode = originalMode;
+  }
 });

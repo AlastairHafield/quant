@@ -32,6 +32,7 @@ import * as topstepx from "./dataSources/topstepx.js";
 import * as tradeJournal from "./tradeJournal.js";
 import { isKillSwitchActive } from "../../shared/killSwitch.js";
 import { computeDailyPnl, isDailyLossCapBreached } from "../../shared/accountRisk.js";
+import { clampToMaxContracts } from "../../shared/protectedLimits.js";
 
 export function toET(d) {
   return new Date(d.toLocaleString("en-US", { timeZone: "America/New_York" }));
@@ -779,7 +780,9 @@ export class Worker {
     // with GEX/FlashAlpha) — it trades its own practice account, whose
     // balance is arbitrary and not calibrated against any ladder, so size is
     // just its own base x wall multiplier, no equity scaling.
-    const size = computeSizeMultiplier(flow.grade, result.sizeMultiplier, CONFIG.risk.sizing);
+    // clampToMaxContracts is a hard ceiling independent of this bot's own
+    // (agent-editable) sizing config — see shared/protectedLimits.js.
+    const size = clampToMaxContracts(computeSizeMultiplier(flow.grade, result.sizeMultiplier, CONFIG.risk.sizing));
     this.executeSignal(result, regimeInfo, flow, size).catch((e) =>
       console.error("Signal execution failed:", e.message)
     );

@@ -17,6 +17,7 @@ import * as topstepx from "./dataSources/topstepx.js";
 import * as tradeJournal from "./tradeJournal.js";
 import { isKillSwitchActive } from "../../shared/killSwitch.js";
 import { computeDailyPnl, isDailyLossCapBreached } from "../../shared/accountRisk.js";
+import { clampToMaxContracts } from "../../shared/protectedLimits.js";
 
 // ProjectX Gateway position type: 1 = Long, 2 = Short — confirmed live on the
 // other two bots by cross-checking a position's type against the direction
@@ -29,6 +30,22 @@ const POSITION_TYPE_TO_DIRECTION = { 1: "long", 2: "short" };
 // non-configurable-module-namespace issue noted in the other two bots).
 export function findUntrackedPosition(positions, contractId) {
   return positions.find((p) => p.contractId === contractId && POSITION_TYPE_TO_DIRECTION[p.type]) ?? null;
+}
+
+// Pure half of resolveAccountId below — split out so the practice/live
+// branching is directly testable without a live topstepx.resolveAccountId
+// call (TopstepX's ESM named exports can't be mocked with node:test's
+// mock.method, same issue noted for findUntrackedPosition above).
+export function accountNameHintFor(config) {
+  return config.accountMode === "practice" ? config.practiceAccountNameHint : undefined;
+}
+
+// In "practice" accountMode, every account-facing call resolves the practice
+// account instead of the real Combine — undefined falls through to
+// resolveAccountId's own default (the real-account env var), same as every
+// call site behaved before practice mode existed.
+export function resolveAccountId(config = CONFIG) {
+  return topstepx.resolveAccountId(accountNameHintFor(config));
 }
 
 export function toET(d) {
@@ -91,7 +108,7 @@ export class Worker {
   }
 
   async pollAccount() {
-    const accountId = await topstepx.resolveAccountId();
+    const accountId = await resolveAccountId();
     const { account, positions } = await topstepx.fetchAccountSnapshot(accountId);
     this.account = account;
     this.openPositions = positions;
@@ -121,6 +138,12 @@ export class Worker {
       await this.tripRiskHalt("kill_switch");
       return;
     }
+
+    // Practice-account balance isn't real money, so the $ daily loss cap
+    // (calibrated to the real Combine) doesn't apply there — the kill switch
+    // above still does, since that's a human emergency stop for all bot
+    // activity, not just real-money accounts.
+    if (CONFIG.accountMode === "practice") return;
 
     const dailyPnl = computeDailyPnl(this.account?.balance ?? null, this.dayStartBalance);
     if (isDailyLossCapBreached(dailyPnl, CONFIG.risk.dailyLossCapDollars)) {
@@ -328,12 +351,14 @@ export class Worker {
   }
 
   async executeEntry(result) {
-    const size = computeSize(CONFIG, this.account?.balance ?? CONFIG.sizing.ladder.startingEquity);
+    // clampToMaxContracts is a hard ceiling independent of this bot's own
+    // (agent-editable) sizing config — see shared/protectedLimits.js.
+    const size = clampToMaxContracts(computeSize(CONFIG, this.account?.balance ?? CONFIG.sizing.ladder.startingEquity));
     let orderId = null;
     let contractId = null;
 
     if (CONFIG.executionEnabled) {
-      const accountId = await topstepx.resolveAccountId();
+      const accountId = await resolveAccountId();
       contractId = await topstepx.resolveFrontMonthContractId(CONFIG.instrument);
       // Throws on a broker rejection (bad size/ticks/etc) — nothing below runs,
       // so a rejected order leaves openPosition/todayGapChecked untouched...
@@ -393,7 +418,7 @@ export class Worker {
   async flatten(lastPrice, reason = "eod_flatten") {
     if (!this.openPosition) return;
     if (CONFIG.executionEnabled) {
-      const accountId = await topstepx.resolveAccountId();
+      const accountId = await resolveAccountId();
       await topstepx.closePositionAndCancelOrders(accountId, this.openPosition.contractId);
     }
     console.log(`Flattening (${reason}): ${this.openPosition.direction} @ ~${lastPrice}`);
@@ -430,7 +455,7 @@ async function subscribeBarsWithRetry(worker, attempt = 1) {
 
 async function startWorker() {
   const worker = createWorker();
-  console.log(`gap-continuation worker starting — signal-only mode: ${!CONFIG.executionEnabled}`);
+  console.log(`gap-continuation worker starting — signal-only mode: ${!CONFIG.executionEnabled}, account mode: ${CONFIG.accountMode}`);
   if (CONFIG.risk.dailyLossCapDollars == null) {
     console.error(
       "WARNING: ACCOUNT_DAILY_LOSS_CAP_DOLLARS is not set — the account-wide daily loss cap is NOT enforced."

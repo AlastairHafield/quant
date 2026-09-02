@@ -4,6 +4,7 @@ export function buildStatusPayload(worker) {
   const lastBar = worker.bars.length ? worker.bars[worker.bars.length - 1] : null;
   return {
     signalOnly: !CONFIG.executionEnabled,
+    accountMode: CONFIG.accountMode,
     instrument: CONFIG.instrument,
     lastPrice: lastBar?.close ?? null,
     barsToday: worker.bars.length,

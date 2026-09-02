@@ -52,11 +52,23 @@ export const CONFIG = {
 
   accountNameHint: process.env.GAP_CONTINUATION_ACCOUNT_NAME || null,
 
+  // Practice-account shadow mode (topstep-prop-firm-plan Phase 4): when
+  // ACCOUNT_MODE=practice, this bot instance trades a TopstepX practice/eval
+  // account instead of the real Combine — same account-selection mechanism
+  // gex-breakout's Order Flow Bot already uses (topstepx.resolveAccountId
+  // takes an explicit hint), just applied to the whole bot rather than
+  // per-strategy since this bot only ever runs one strategy. Defaults to
+  // "live" — a bot must be EXPLICITLY told to run in practice mode, never
+  // silently switched by an unset env var.
+  accountMode: process.env.ACCOUNT_MODE === "practice" ? "practice" : "live",
+  practiceAccountNameHint: process.env.GAP_CONTINUATION_PRACTICE_ACCOUNT_NAME || null,
+
   risk: {
     // Account-WIDE cap in $, shared across every bot trading this same real
-    // Combine (gap-continuation, mechanical-orb, gex-breakout's Strategy B) —
-    // see shared/accountRisk.js. Not set = unenforced (worker.js logs a
-    // startup warning so this can't silently be "off" without anyone noticing).
+    // Combine (gap-continuation, mechanical-orb) — see shared/accountRisk.js.
+    // Not set = unenforced (worker.js logs a startup warning so this can't
+    // silently be "off" without anyone noticing). Only applies in "live"
+    // accountMode — a practice account isn't real money.
     dailyLossCapDollars: process.env.ACCOUNT_DAILY_LOSS_CAP_DOLLARS
       ? Number(process.env.ACCOUNT_DAILY_LOSS_CAP_DOLLARS)
       : null,
