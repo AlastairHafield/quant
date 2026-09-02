@@ -385,6 +385,29 @@ export function createWorker() {
   return new Worker();
 }
 
+// A rejected subscribeBars() (e.g. a WebSocket transport failure on the
+// initial connect, or a transient TopstepX login error) is an unhandled
+// rejection if awaited directly in startWorker() — the same class of crash
+// confirmed live 2026-07-27 on gap-continuation (right as that bot started
+// managing a real account) and reproduced here live on 2026-09-02 during a
+// routine deploy restart (three dynos logging into the same TopstepX
+// account near-simultaneously produced a transient login failure this bot
+// had no retry for, crash-looping it while the other two bots came up
+// fine). subscribeBars() already has .withAutomaticReconnect() for drops
+// AFTER a successful connect; this wrapper is specifically for the
+// initial-connect failure case, retrying with capped backoff instead of
+// ever letting a connection hiccup take the whole worker down.
+async function subscribeBarsWithRetry(worker, attempt = 1) {
+  try {
+    await topstepx.subscribeBars(CONFIG.instrument, (bar) => worker.onBar(bar));
+  } catch (e) {
+    const waitMs = Math.min(5000 * attempt, 60000);
+    console.error(`subscribeBars failed (attempt ${attempt}): ${e.message} — retrying in ${waitMs / 1000}s`);
+    await new Promise((resolve) => setTimeout(resolve, waitMs));
+    return subscribeBarsWithRetry(worker, attempt + 1);
+  }
+}
+
 async function startWorker() {
   const worker = createWorker();
   console.log(`mechanical-orb worker starting — signal-only mode: ${!CONFIG.executionEnabled}, account mode: ${CONFIG.accountMode}`);
@@ -405,7 +428,7 @@ async function startWorker() {
 
   setInterval(() => worker.pollAccount().catch((e) => console.error("Account poll failed:", e.message)), 5000);
 
-  await topstepx.subscribeBars(CONFIG.instrument, (bar) => worker.onBar(bar));
+  await subscribeBarsWithRetry(worker);
 
   // Reads "already flushed today" from Mongo rather than an in-memory flag —
   // a restart used to reset that flag to null and, if the restart happened
