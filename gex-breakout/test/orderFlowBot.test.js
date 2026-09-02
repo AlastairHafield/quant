@@ -62,20 +62,20 @@ test("isZoneOnCooldown: true within the window, false after it, false if never t
   assert.equal(isZoneOnCooldown("z2", cooldowns, 1000, 60), false);
 });
 
-test("buildActiveZones: footprint zones as-is on NEG_GAMMA (trend) days", () => {
+test("buildActiveZones: footprint zones as-is on TREND (trend) days", () => {
   const footprintZones = [{ side: "buy", low: 100, high: 102 }];
-  assert.equal(buildActiveZones({ baseRegime: "NEG_GAMMA" }, { footprintZones, valueArea: null }), footprintZones);
+  assert.equal(buildActiveZones({ baseRegime: "TREND" }, { footprintZones, valueArea: null }), footprintZones);
 });
 
-test("buildActiveZones: the value area as a single zone on POS_GAMMA (mean-reversion) days", () => {
+test("buildActiveZones: the value area as a single zone on RANGE (mean-reversion) days", () => {
   const valueArea = { high: 105, low: 100 };
-  assert.deepEqual(buildActiveZones({ baseRegime: "POS_GAMMA" }, { footprintZones: [], valueArea }), [
+  assert.deepEqual(buildActiveZones({ baseRegime: "RANGE" }, { footprintZones: [], valueArea }), [
     { side: null, low: 100, high: 105 },
   ]);
 });
 
-test("buildActiveZones: no zones on a POS_GAMMA day with no value area yet", () => {
-  assert.deepEqual(buildActiveZones({ baseRegime: "POS_GAMMA" }, { footprintZones: [], valueArea: null }), []);
+test("buildActiveZones: no zones on a RANGE day with no value area yet", () => {
+  assert.deepEqual(buildActiveZones({ baseRegime: "RANGE" }, { footprintZones: [], valueArea: null }), []);
 });
 
 test("computeZoneStop: long stop sits triggerBufferPts below the zone low", () => {
@@ -150,7 +150,7 @@ test("nearestZoneOrSynthetic: synthetic zone half-width is stopCapPts minus trig
   assert.deepEqual(nearestZoneOrSynthetic([], 5500, 12, 1), { side: null, low: 5489, high: 5511 });
 });
 
-test("evaluateOrderFlowBot: POS_GAMMA failed-auction produces a full contrarian signal", () => {
+test("evaluateOrderFlowBot: RANGE failed-auction produces a full contrarian signal", () => {
   const bars = [
     { close: 103, high: 104, low: 102 },
     { close: 106.5, high: 107, low: 105.5 }, // probes above value
@@ -160,7 +160,7 @@ test("evaluateOrderFlowBot: POS_GAMMA failed-auction produces a full contrarian 
     nowET: before,
     bars,
     index: 2,
-    regimeInfo: { baseRegime: "POS_GAMMA", regime: "POS_GAMMA" },
+    regimeInfo: { baseRegime: "RANGE", regime: "RANGE" },
     footprintZones: [],
     valueArea: { high: 105, low: 100 },
     touchWindow: null,
@@ -183,12 +183,12 @@ test("evaluateOrderFlowBot: POS_GAMMA failed-auction produces a full contrarian 
     targetMode: "contrarian_value_area",
     sizeMultiplier: 1,
     isTrendDay: false,
-    regime: "POS_GAMMA",
+    regime: "RANGE",
     veto: null,
   });
 });
 
-test("evaluateOrderFlowBot: NEG_GAMMA absorption on a footprint zone produces a trend-day placeholder-target signal", () => {
+test("evaluateOrderFlowBot: TREND absorption on a footprint zone produces a trend-day placeholder-target signal", () => {
   const priorBars = Array.from({ length: 20 }, () => ({ volume: 100 }));
   const touchWindow = [
     { high: 5501, low: 5499.5, volume: 200 },
@@ -200,7 +200,7 @@ test("evaluateOrderFlowBot: NEG_GAMMA absorption on a footprint zone produces a 
     nowET: before,
     bars,
     index: 0,
-    regimeInfo: { baseRegime: "NEG_GAMMA", regime: "NEG_GAMMA" },
+    regimeInfo: { baseRegime: "TREND", regime: "TREND" },
     footprintZones: [{ side: "buy", low: 5498, high: 5500 }],
     valueArea: null,
     touchWindow,
@@ -223,7 +223,7 @@ test("evaluateOrderFlowBot: NEG_GAMMA absorption on a footprint zone produces a 
     targetMode: "trend_trail_placeholder",
     sizeMultiplier: 1,
     isTrendDay: true,
-    regime: "NEG_GAMMA",
+    regime: "TREND",
     veto: null,
   });
 });
@@ -245,7 +245,7 @@ test("evaluateOrderFlowBot: path-of-least-resistance fires even with ZERO footpr
     nowET: before,
     bars,
     index: 6,
-    regimeInfo: { baseRegime: "NEG_GAMMA", regime: "NEG_GAMMA" },
+    regimeInfo: { baseRegime: "TREND", regime: "TREND" },
     footprintZones: [], // <- the exact live state that silently blocked everything before this fix
     valueArea: null,
     touchWindow: null,
@@ -268,7 +268,7 @@ test("evaluateOrderFlowBot: path-of-least-resistance fires even with ZERO footpr
     targetMode: "trend_trail_placeholder",
     sizeMultiplier: 1,
     isTrendDay: true,
-    regime: "NEG_GAMMA",
+    regime: "TREND",
     veto: null,
   });
 });
@@ -287,7 +287,7 @@ test("evaluateOrderFlowBot: path-of-least-resistance attaches to a real nearby z
     nowET: before,
     bars,
     index: 6,
-    regimeInfo: { baseRegime: "NEG_GAMMA", regime: "NEG_GAMMA" },
+    regimeInfo: { baseRegime: "TREND", regime: "TREND" },
     footprintZones: [{ side: "sell", low: 100, high: 104 }], // midpoint 102, nearest to entry 103
     valueArea: null,
     touchWindow: null, // no absorption data, so this zone's own absorption check is a no-op
@@ -310,7 +310,7 @@ test("evaluateOrderFlowBot: path-of-least-resistance attaches to a real nearby z
     targetMode: "trend_trail_placeholder",
     sizeMultiplier: 1,
     isTrendDay: true,
-    regime: "NEG_GAMMA",
+    regime: "TREND",
     veto: null,
   });
 });
@@ -320,7 +320,7 @@ test("evaluateOrderFlowBot: vetoes past the entry cutoff before evaluating anyth
     nowET: new Date(2026, 6, 24, 13, 0),
     bars: [{ close: 100 }],
     index: 0,
-    regimeInfo: { baseRegime: "POS_GAMMA", regime: "POS_GAMMA" },
+    regimeInfo: { baseRegime: "RANGE", regime: "RANGE" },
     footprintZones: [],
     valueArea: null,
     touchWindow: null,
@@ -337,7 +337,7 @@ test("evaluateOrderFlowBot: vetoes once maxTradesPerDay is reached", () => {
     nowET: before,
     bars: [{ close: 100 }],
     index: 0,
-    regimeInfo: { baseRegime: "POS_GAMMA", regime: "POS_GAMMA" },
+    regimeInfo: { baseRegime: "RANGE", regime: "RANGE" },
     footprintZones: [],
     valueArea: null,
     touchWindow: null,
@@ -372,7 +372,7 @@ test("evaluateOrderFlowBot: vetoes a path-of-least-resistance (continuation) tri
     nowET: before,
     bars,
     index: 6,
-    regimeInfo: { baseRegime: "NEG_GAMMA", regime: "NEG_GAMMA" },
+    regimeInfo: { baseRegime: "TREND", regime: "TREND" },
     footprintZones: [],
     valueArea: null,
     touchWindow: null,
@@ -404,7 +404,7 @@ test("evaluateOrderFlowBot: a failed_auction (fade) trigger ignores a nearby wal
     nowET: before,
     bars,
     index: 2,
-    regimeInfo: { baseRegime: "POS_GAMMA", regime: "POS_GAMMA" },
+    regimeInfo: { baseRegime: "RANGE", regime: "RANGE" },
     footprintZones: [],
     valueArea: { high: 105, low: 100 },
     touchWindow: null,
@@ -428,7 +428,7 @@ test("evaluateOrderFlowBot: vetoes when the stop would exceed stopCapPts", () =>
     nowET: before,
     bars,
     index: 1,
-    regimeInfo: { baseRegime: "POS_GAMMA", regime: "POS_GAMMA" },
+    regimeInfo: { baseRegime: "RANGE", regime: "RANGE" },
     footprintZones: [],
     valueArea: { high: 200, low: 100 },
     touchWindow: null,
@@ -455,7 +455,7 @@ test("evaluateOrderFlowBot: vetoes when the target is closer than the stop", () 
     nowET: before,
     bars,
     index: 1,
-    regimeInfo: { baseRegime: "POS_GAMMA", regime: "POS_GAMMA" },
+    regimeInfo: { baseRegime: "RANGE", regime: "RANGE" },
     footprintZones: [],
     valueArea: { high: 100.5, low: 100 },
     touchWindow: null,
@@ -484,7 +484,7 @@ test("evaluateOrderFlowBot: a zone on cooldown produces no signal at all, not ev
     nowET: before,
     bars,
     index: 2,
-    regimeInfo: { baseRegime: "POS_GAMMA", regime: "POS_GAMMA" },
+    regimeInfo: { baseRegime: "RANGE", regime: "RANGE" },
     footprintZones: [],
     valueArea: { high: 105, low: 100 },
     touchWindow: null,
@@ -501,7 +501,7 @@ test("evaluateOrderFlowBot: null when nothing triggers", () => {
     nowET: before,
     bars: [{ close: 100, buyVolume: 10, sellVolume: 10, cumDelta: 0 }],
     index: 0,
-    regimeInfo: { baseRegime: "NEG_GAMMA", regime: "NEG_GAMMA" },
+    regimeInfo: { baseRegime: "TREND", regime: "TREND" },
     footprintZones: [],
     valueArea: null,
     touchWindow: null,

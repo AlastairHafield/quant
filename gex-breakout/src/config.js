@@ -4,9 +4,6 @@ export const POINT_VALUE = { MES: 5, ES: 50 };
 export const CONFIG = {
   instrumentTrade: process.env.INSTRUMENT_TRADE || "MES",
   instrumentData: process.env.INSTRUMENT_DATA || "ES",
-  underlyingOptions: process.env.UNDERLYING_OPTIONS || "SPX",
-  includeWeeklies: true,
-  maxDte: 5,
 
   sessionOpenET: { h: 9, m: 30 },
   // No new entries in the first 15 minutes of RTH (user's call, 2026-07-30):
@@ -29,8 +26,6 @@ export const CONFIG = {
 
   maxLossesPerStrategyPerDay: 2, // plus: a single winning trade also halts that strategy for the day (see riskSession.js)
 
-  gexRecalcMin: 15,
-  basisRecalcMin: 5,
   // If no bars arrive for this long during the trading day, worker.js's
   // watchdog forces a SignalR reconnect (see isBarStreamStale) — bars should
   // arrive roughly every minute, so 3x that comfortably absorbs a normal
@@ -42,27 +37,20 @@ export const CONFIG = {
   // real event frequency is observed.
   depthStaleThresholdMin: 3,
 
-  gex: {
-    // GEX_strike = gamma * OI * 100 * spot^2 * 0.01
-    sign: { call: 1, put: -1 },
-    // 0DTE same-day volume blended in as an OI staleness proxy: effectiveOI = OI + blendWeight * volume
-    staleness: {
-      blendWeight: 0.5,
-      useVolumeBlend: false,
-      reducedConfidenceAfterET: { h: 12, m: 0 },
-    },
-    wallCount: 3,
-  },
-
+  // TopstepX-only regime signal for the Order Flow Bot (replaces net-GEX
+  // NEG_GAMMA/POS_GAMMA classification, removed with GEX/FlashAlpha) — same
+  // prior-day ADX filter gap-continuation and mechanical-orb already use.
+  // See regime.js's classifyRegime.
   regime: {
-    nearFlipPts: 10,
+    adxPeriod: 14,
+    adxThreshold: 25,
+    // Calendar days, not trading days — see the other two bots' identical
+    // comment: a 40-day request only yielded 27 trading days live, one short
+    // of adx(14)'s 28-bar minimum. 75 comfortably clears ~50 trading days.
+    dailyLookbackDays: 75,
   },
 
   levels: {
-    consolidation: {
-      lookbackBars: 20,
-      maxRangePts: 8,
-    },
     wallFilter: {
       nearPts: 15,
       // "skip" vetoes the trade outright; "half_at_wall" takes it at half size with target capped at the wall
@@ -84,15 +72,11 @@ export const CONFIG = {
     },
   },
 
-  // Shared trade-management defaults — read by Strategy B (strategyB.js) AND the
-  // Order Flow Bot (orderFlowBot.js). breakevenAtR/takePartialFraction are applied
-  // unconditionally to EVERY open trade regardless of which strategy opened it
-  // (worker.js's evaluateOpenTrades/actOnExitResult), not just one strategy's —
-  // this used to live under the (removed) strategyA config block despite that.
+  // Trade-management defaults for the Order Flow Bot (orderFlowBot.js) —
+  // breakevenAtR/takePartialFraction are applied unconditionally to every
+  // open trade (worker.js's evaluateOpenTrades/actOnExitResult).
   tradeManagement: {
     stopCapPts: 12,
-    targetMaxDistancePts: 30,
-    fixedTargetR: 2,
     breakevenAtR: 1,
     takePartialFraction: 0.5,
   },
@@ -172,20 +156,8 @@ export const CONFIG = {
     accountNameHint: process.env.STRATEGY_OF_ACCOUNT_NAME || null,
   },
 
-  strategyB: {
-    triggerBufferPts: 1,
-    proximity: {
-      withinPts: 10,
-      forMinutes: 15,
-    },
-    cooldownMinPerLevel: 60,
-    maxTradesPerDay: 3,
-  },
-
   exit: {
-    failedBreakoutPts: 2,
     divergenceWithinBarsOfEntry: 5,
-    posGammaTrailBars: 1,
   },
 
   risk: {
@@ -197,48 +169,23 @@ export const CONFIG = {
     dailyLossCapDollars: process.env.ACCOUNT_DAILY_LOSS_CAP_DOLLARS
       ? Number(process.env.ACCOUNT_DAILY_LOSS_CAP_DOLLARS)
       : null,
-    recalcSettle: {
-      flipMoveThresholdPts: 5,
-      noEntryMinutesAfterRecalc: 1,
-    },
-    halt: {
-      basisStaleMaxMin: 10,
-      deltaFeedGapMaxMin: 2,
-    },
+    // Order Flow Bot flow-grade sizing (strong-flow "A" vs weak-flow "B"
+    // confirming order flow, unrelated to the old Strategy A/B strategy
+    // identities) — see computeSizeMultiplier (riskSession.js). The
+    // equity ladder that used to scale Strategy B's size on the real
+    // Combine was removed with Strategy B itself (topstep-prop-firm-plan's
+    // real-money ladder, and the class of bug it caused live on 2026-07-28,
+    // is now moot — the Order Flow Bot trades the practice account flat,
+    // see worker.js's handleSignal).
     sizing: {
       A: 4,
       B: 2,
-      // Scales Strategy B's base size above by ladderContracts(equity)/ladder.baseContracts
-      // as account equity grows, preserving the wall-proximity multiplier rather than
-      // replacing it with a flat count (topstep-prop-firm-plan Phase 3: 1 contract base,
-      // +1 per $2,000 of equity growth, capped at 15).
-      // startingEquity MUST be this specific account's actual nominal starting balance,
-      // not a generic reference value — the Phase 3 plan's $2,000 figure was written for
-      // an eventual real PERSONAL account, not this $50K Combine (account name "50KTC").
-      // Bug caught live 2026-07-28: with startingEquity left at $2,000 against a real
-      // ~$49,587 Combine balance, the ladder read that as "grown from $2K to $50K" and
-      // instantly maxed out at the 15x cap — two real Strategy B trades fired at 30
-      // contracts (2 base x 15x) instead of ~2. Only Strategy B uses this; Strategy A
-      // trades the practice account (an arbitrary, not-necessarily-stable balance) and
-      // stays flat (ratio 1x, see worker.js's handleSignal) until practice-account
-      // sizing gets its own deliberate calibration.
-      ladder: {
-        baseContracts: 1,
-        perContractEquityStep: 2000,
-        startingEquity: 50000,
-        cap: 15,
-      },
     },
   },
 
   discord: {
     signalWebhook: process.env.DISCORD_WEBHOOK || null,
     logWebhook: process.env.LOG_WEBHOOK || process.env.DISCORD_WEBHOOK || null,
-  },
-
-  posGammaOverride: {
-    enabled: false,
-    requireFlowGrade: "A",
   },
 
   executionEnabled: process.env.EXECUTION_ENABLED === "true",

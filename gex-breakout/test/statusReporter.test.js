@@ -11,10 +11,10 @@ test("buildStatusPayload: sane defaults before any data has arrived", () => {
   assert.equal(payload.lastPrice, null);
   assert.equal(payload.barsToday, 0);
   assert.equal(payload.regime, null);
-  assert.equal(payload.gex, null);
-  assert.equal(payload.basis, null);
+  assert.equal(payload.adx, null);
+  assert.equal(payload.adxOk, false);
+  assert.deepEqual(payload.walls, { aboveSpot: [], belowSpot: [] });
   assert.deepEqual(payload.dayState, {
-    strategyBTradesToday: 0,
     orderFlowTradesToday: 0,
     haltedStrategies: [],
     winsToday: {},
@@ -41,20 +41,21 @@ test("buildStatusPayload: sane defaults before any data has arrived", () => {
   assert.equal(payload.orderFlowDiagnostics.sessionBarsCount, 0);
 });
 
-test("buildStatusPayload: orderFlowDiagnostics reports baseRegime (not the NEAR_FLIP-masked regime) and the session value area", () => {
+test("buildStatusPayload: orderFlowDiagnostics reports the base regime and the session value area/POC, and top-level walls derive from them", () => {
   const worker = createWorker();
-  worker.lastRegimeInfo = { baseRegime: "POS_GAMMA", regime: "NEAR_FLIP", nearFlip: true };
+  worker.lastRegimeInfo = { baseRegime: "RANGE", regime: "RANGE" };
   worker.lastPOC = 5500;
   worker.lastValueArea = { high: 5510, low: 5490, volume: 1000 };
   worker.bars.push({ close: 5500 }, { close: 5501 });
   worker.todaySessionStartIndex = 1;
 
   const payload = buildStatusPayload(worker);
-  assert.equal(payload.regime, "NEAR_FLIP"); // the top-level field stays as-is
-  assert.equal(payload.orderFlowDiagnostics.baseRegime, "POS_GAMMA"); // the true base regime, unmasked
+  assert.equal(payload.regime, "RANGE");
+  assert.equal(payload.orderFlowDiagnostics.baseRegime, "RANGE");
   assert.equal(payload.orderFlowDiagnostics.poc, 5500);
   assert.deepEqual(payload.orderFlowDiagnostics.valueArea, { high: 5510, low: 5490, volume: 1000 });
   assert.equal(payload.orderFlowDiagnostics.sessionBarsCount, 1); // 2 bars total, session started at index 1
+  assert.equal(payload.walls.aboveSpot.length, 3); // value-area high/low + POC
 });
 
 test("buildStatusPayload: orderFlowDiagnostics reports connectivity and real depth data once events arrive", () => {
@@ -100,23 +101,20 @@ test("buildStatusPayload: orderFlowBot reports its OWN (practice) account, indep
   assert.equal(payload.openPositions.length, 1);
 });
 
-test("buildStatusPayload: reflects live GEX/basis/regime/day-state once populated", () => {
+test("buildStatusPayload: reflects live ADX/regime/day-state once populated", () => {
   const worker = createWorker();
-  worker.gexSnapshot = { netGex: -5e9, flipPoint: 5400, walls: { aboveSpot: [], belowSpot: [] }, confidence: "FULL", asOf: "t" };
-  worker.basis = 8;
-  worker.basisAsOf = new Date("2026-07-24T14:00:00Z");
-  worker.rebuildLevels();
-  worker.lastRegimeInfo = { regime: "NEG_GAMMA", baseRegime: "NEG_GAMMA", nearFlip: false };
+  worker.priorDayAdx = 31.2;
+  worker.priorDayAdxOk = true;
+  worker.lastRegimeInfo = { regime: "TREND", baseRegime: "TREND" };
   worker.riskManager.recordOrderFlowTrade("VA_HIGH:5530.00", 1000);
   worker.riskManager.recordTradeResult("OF", -100);
   worker.bars.push({ close: 5522 });
 
   const payload = buildStatusPayload(worker);
   assert.equal(payload.lastPrice, 5522);
-  assert.equal(payload.regime, "NEG_GAMMA");
-  assert.equal(payload.gex.netGex, -5e9);
-  assert.equal(payload.flipPointEs, 5408);
-  assert.equal(payload.basis, 8);
+  assert.equal(payload.regime, "TREND");
+  assert.equal(payload.adx, 31.2);
+  assert.equal(payload.adxOk, true);
   assert.equal(payload.dayState.orderFlowTradesToday, 1);
   assert.equal(payload.dayState.lossesToday.OF, 1);
 });

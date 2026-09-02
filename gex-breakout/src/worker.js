@@ -1,31 +1,10 @@
 import { pathToFileURL } from "node:url";
 import { CONFIG, POINT_VALUE } from "./config.js";
-import { computeGexSnapshotFromProfile } from "./gexEngine.js";
-import { computeBasis, toEsLevels } from "./basis.js";
+import { priorDayAdxOk } from "./adx.js";
 import { classifyRegime } from "./regime.js";
-import {
-  buildGexLevels,
-  buildDailyLevels,
-  detectConsolidation,
-  consolidationLevels,
-  isInOpenSpace,
-} from "./levelEngine.js";
-import {
-  evaluateBreakoutFlow,
-  buildAbsorptionWindow,
-  describePathOfLeastResistance,
-  describeLackOfParticipation,
-} from "./orderFlow.js";
-import {
-  checkBreakoutTrigger,
-  checkProximity,
-  levelKeyFor,
-  isLevelOnCooldown,
-  evaluateStrategyB,
-} from "./strategyB.js";
-import { SessionRiskManager, checkDataHealth, checkRecalcSettle, computeSizeMultiplier } from "./riskSession.js";
-import { ladderRatio } from "./sizing.js";
-import { evaluateExit } from "./exitRules.js";
+import { buildOrderFlowWalls } from "./levelEngine.js";
+import { buildAbsorptionWindow, describePathOfLeastResistance, describeLackOfParticipation } from "./orderFlow.js";
+import { SessionRiskManager, computeSizeMultiplier } from "./riskSession.js";
 import { evaluateOrderFlowExit, nearestZonePriceFor } from "./orderFlowExits.js";
 import { evaluateOrderFlowBot } from "./orderFlowBot.js";
 import { buildFootprintZones } from "./footprint.js";
@@ -50,7 +29,6 @@ import {
   clampStopDistance,
 } from "./positionTracking.js";
 import * as topstepx from "./dataSources/topstepx.js";
-import * as flashalpha from "./dataSources/flashalpha.js";
 import * as tradeJournal from "./tradeJournal.js";
 import { isKillSwitchActive } from "../../shared/killSwitch.js";
 import { computeDailyPnl, isDailyLossCapBreached } from "../../shared/accountRisk.js";
@@ -177,29 +155,6 @@ export function tradesRequiringCloseOnFlip(trackedTrades, contractId, newDirecti
   return flipping ? contractTrades : [];
 }
 
-export function shiftWalls(walls, basis) {
-  const shift = (arr) => arr.map((w) => ({ ...w, strike: w.strike + basis }));
-  return { aboveSpot: shift(walls.aboveSpot), belowSpot: shift(walls.belowSpot) };
-}
-
-export function buildLevelState({ gexSnapshot, basis, dailyLevels, consolRange }) {
-  if (!gexSnapshot || basis == null) {
-    return { levels: [], triggerLevelsB: [], flipPointEs: null, wallsEs: { aboveSpot: [], belowSpot: [] } };
-  }
-  const gexLevelsEs = toEsLevels(buildGexLevels(gexSnapshot), basis);
-  const flipPointEs = gexLevelsEs.find((l) => l.type === "FLIP")?.price ?? null;
-  const wallsEs = shiftWalls(gexSnapshot.walls, basis);
-  const consolLevelsEs = consolidationLevels(consolRange);
-
-  const levels = [...gexLevelsEs, ...dailyLevels, ...consolLevelsEs];
-  const triggerLevelsB = [
-    ...gexLevelsEs.filter((l) => l.type === "FLIP" || l.type === "GEX_WALL"),
-    ...dailyLevels,
-    ...consolLevelsEs,
-  ];
-  return { levels, triggerLevelsB, flipPointEs, wallsEs };
-}
-
 // ---- Stateful orchestration below. Not unit-tested directly (it's IO glue around
 // the pure helpers above and the strategy modules) — exercise it against the
 // Topstep Practice Account once real data adapters are wired up (Task 7). ----
@@ -210,22 +165,8 @@ export class Worker {
     this.logger = new SignalLogger();
     this.bars = [];
     this.currentDay = null;
-    this.gexSnapshot = null;
-    this.basis = null;
-    this.basisAsOf = null;
-    this.lastRecalcAt = null;
-    this.lastFlipMovePts = null;
-    this.priorDayHigh = null;
-    this.priorDayLow = null;
-    this.overnightHigh = null;
-    this.overnightLow = null;
-    this.levelState = {
-      levels: [],
-      triggerLevelsB: [],
-      flipPointEs: null,
-      wallsEs: { aboveSpot: [], belowSpot: [] },
-    };
-    this.pendingB = null;
+    this.priorDayAdx = null;
+    this.priorDayAdxOk = false;
     this.lastRegimeInfo = null;
     this.account = null; // "default" role — everything except the Order Flow Bot
     this.openPositions = [];
@@ -375,7 +316,6 @@ export class Worker {
         originalTargetPrice: null,
         brokenLevel: null,
         entryIndex: null, // unknown — evaluateOpenTrades skips dynamic management for reconciled trades
-        lastRegimeBase: null,
         movedToBreakeven: true, // no known stop to move; don't attempt it
         actionInFlight: false,
         contractId: pos.contractId,
@@ -572,57 +512,33 @@ export class Worker {
     // Mongo and counted in the daily summary's manualCloses breakdown.
   }
 
-  rebuildLevels() {
-    const dailyLevels = buildDailyLevels({
-      priorDayHigh: this.priorDayHigh,
-      priorDayLow: this.priorDayLow,
-      overnightHigh: this.overnightHigh,
-      overnightLow: this.overnightLow,
+  // TopstepX-only regime signal for the Order Flow Bot (replaces GEX/basis
+  // recalcs, removed with FlashAlpha) — same prior-day ADX pattern
+  // gap-continuation/mechanical-orb already use, computed off the ES data
+  // feed (instrumentData) since that's where this bot's other technical
+  // analysis (footprint, depth, volume profile) already lives.
+  async refreshAdx() {
+    const dailyBars = await topstepx.fetchDailyBars(CONFIG.instrumentData, CONFIG.regime.dailyLookbackDays);
+    const result = priorDayAdxOk(dailyBars, {
+      adxPeriod: CONFIG.regime.adxPeriod,
+      adxThreshold: CONFIG.regime.adxThreshold,
     });
-    const consolRange = detectConsolidation(this.bars, CONFIG.levels.consolidation);
-    this.levelState = buildLevelState({
-      gexSnapshot: this.gexSnapshot,
-      basis: this.basis,
-      dailyLevels,
-      consolRange,
-    });
+    this.priorDayAdx = result.adx;
+    this.priorDayAdxOk = result.ok;
   }
 
-  async recalcGex() {
-    const { profile, spot, flipPoint } = await flashalpha.fetchGexProfile(
-      CONFIG.underlyingOptions,
-      CONFIG.maxDte,
-      nowET()
-    );
-    const prevFlip = this.levelState.flipPointEs;
-    this.gexSnapshot = computeGexSnapshotFromProfile(profile, spot, CONFIG.gex, nowET(), flipPoint);
-    this.lastRecalcAt = new Date();
-    this.rebuildLevels();
-    if (prevFlip != null && this.levelState.flipPointEs != null) {
-      this.lastFlipMovePts = this.levelState.flipPointEs - prevFlip;
-    }
-  }
-
-  async recalcBasis() {
-    const esPrice = await topstepx.fetchLastPrice(CONFIG.instrumentData);
-    const spxPrice = await flashalpha.fetchUnderlyingPrice(CONFIG.underlyingOptions);
-    this.basis = computeBasis(esPrice, spxPrice);
-    this.basisAsOf = new Date();
-    this.rebuildLevels();
-  }
-
-  // Nothing previously reset pendingB/riskManager's day-state (win/loss
-  // halts, level cooldowns) at a new day — a real live incident (2026-07-28:
-  // two real Strategy B trades fired hours before the real 9:30 ET session
-  // open, on an account that hadn't restarted since before midnight, because
-  // the now-removed ORB-lock state stayed stuck true overnight) is why this
+  // Nothing previously reset riskManager's day-state (win/loss halts, zone
+  // cooldowns) at a new day — a real live incident (2026-07-28: two real
+  // Strategy B trades fired hours before the real 9:30 ET session open, on
+  // an account that hadn't restarted since before midnight, because the
+  // now-removed ORB-lock state stayed stuck true overnight) is why this
   // exists at all. SessionRiskManager.resetDay() already existed for exactly
   // this but was never actually called anywhere after construction.
   checkDayRollover(t) {
     const dayKey = t.toDateString();
     if (this.currentDay === dayKey) return;
     this.currentDay = dayKey;
-    this.pendingB = null;
+    this.refreshAdx().catch((e) => console.error("ADX refresh failed:", e.message));
     this.riskManager.resetDay();
     // Called before this bar is pushed to this.bars — its current length is
     // exactly "every bar from prior days," so today's bars start right here.
@@ -714,43 +630,13 @@ export class Worker {
       return;
     }
 
-    if (this.basisAsOf) {
-      const health = checkDataHealth({
-        basisAsOf: this.basisAsOf,
-        deltaFeedLastBarAt: new Date(),
-        now: new Date(),
-        haltCfg: CONFIG.risk.halt,
-      });
-      if (!health.healthy) {
-        this.logger.log(buildLogRow({ ts: new Date().toISOString(), vetoReason: health.reason }));
-        return;
-      }
-    }
-
-    if (this.lastRecalcAt && this.lastFlipMovePts != null) {
-      const blocked = checkRecalcSettle({
-        flipMovedPts: this.lastFlipMovePts,
-        recalcAt: this.lastRecalcAt,
-        now: new Date(),
-        settleCfg: CONFIG.risk.recalcSettle,
-      });
-      if (blocked) return;
-    }
-
-    if (!this.gexSnapshot) return;
-    const regimeInfo = classifyRegime({
-      netGex: this.gexSnapshot.netGex,
-      price: bar.close,
-      flipPointEs: this.levelState.flipPointEs,
-      nearFlipPts: CONFIG.regime.nearFlipPts,
-    });
+    const regimeInfo = classifyRegime({ trendDayOk: this.priorDayAdxOk });
     this.lastRegimeInfo = regimeInfo;
 
     const idx = this.bars.length - 1;
     const prevBar = this.bars[idx - 1] ?? bar;
 
     this.tryOrderFlow(bar, prevBar, idx, t, regimeInfo);
-    this.tryStrategyB(bar, prevBar, idx, t, regimeInfo);
   }
 
   // Unlike Strategy A/B, absorption/path-of-least-resistance/lack-of-
@@ -781,6 +667,11 @@ export class Worker {
     const valueArea = this.lastValueArea;
 
     const absorptionWindow = buildAbsorptionWindow(this.bars, idx, CONFIG.orderFlow.absorption);
+    // TopstepX-only substitute for GEX strike walls (removed with
+    // FlashAlpha) — the session value area's edges and POC, recomputed fresh
+    // every bar right alongside them above rather than on a separate 5/15-min
+    // recalc timer the way GEX/basis used to be.
+    const walls = buildOrderFlowWalls({ valueArea, poc: this.lastPOC });
 
     const result = evaluateOrderFlowBot({
       nowET: t,
@@ -791,7 +682,7 @@ export class Worker {
       valueArea,
       touchWindow: absorptionWindow?.touchWindow ?? null,
       priorBars: absorptionWindow?.priorBars ?? [],
-      walls: this.levelState.wallsEs,
+      walls,
       config: CONFIG,
       dayState: this.riskManager.dayState,
     });
@@ -835,8 +726,6 @@ export class Worker {
         ts: new Date().toISOString(),
         strategy: "OF",
         regime: regimeInfo?.regime ?? null,
-        netGex: this.gexSnapshot?.netGex ?? null,
-        flipPoint: this.levelState.flipPointEs,
         vetoReason: "no_trigger_heartbeat",
         deltaStats: {
           baseRegime: regimeInfo?.baseRegime ?? null,
@@ -850,114 +739,11 @@ export class Worker {
     );
   }
 
-  tryStrategyB(bar, prevBar, idx, t, regimeInfo) {
-    if (!this.riskManager.canTrade("B")) return;
-
-    if (this.pendingB && this.pendingB.breakoutIndex === idx - 1) {
-      const pending = this.pendingB;
-      this.pendingB = null;
-      const flow = evaluateBreakoutFlow(
-        this.bars,
-        pending.breakoutIndex,
-        pending.direction,
-        pending.level.price,
-        CONFIG.orderFlow
-      );
-      if (flow.grade !== "PENDING") {
-        const result = evaluateStrategyB({
-          price: pending.entryPrice,
-          prevPrice: pending.prevPrice,
-          priorBars: pending.priorBars,
-          triggerLevels: pending.triggerLevels,
-          regimeInfo: pending.regimeInfo,
-          flipPointEs: pending.flipPointEs,
-          walls: pending.walls,
-          flowGrade: flow.grade,
-          levels: pending.levels,
-          nowET: pending.nowET,
-          nowMs: pending.nowMs,
-          config: CONFIG,
-          dayState: this.riskManager.dayState,
-        });
-        if (result) {
-          this.handleSignal(result, pending.regimeInfo, flow);
-        }
-      }
-    }
-
-    if (!this.pendingB && idx >= 1) {
-      const priorBars = this.bars.slice(0, idx);
-      for (const level of this.levelState.triggerLevelsB) {
-        const direction = checkBreakoutTrigger(bar.close, level, CONFIG.strategyB.triggerBufferPts);
-        if (!direction) continue;
-
-        // Real live gap caught 2026-07-30: a level crossing that fails
-        // cooldown or proximity was silently skipped — zero log trace, not
-        // even a veto row — indistinguishable from "nothing happened" even
-        // though a real crossing was seen and rejected. checkBreakoutTrigger
-        // keeps returning the same direction for as long as price stays past
-        // the buffer, so only log on the bar price actually TRANSITIONS into
-        // triggering this level+direction — otherwise a fast multi-bar move
-        // past a level would spam one row per bar for as long as it holds.
-        const prevDirection = checkBreakoutTrigger(prevBar.close, level, CONFIG.strategyB.triggerBufferPts);
-        const justCrossed = prevDirection !== direction;
-
-        const levelKey = levelKeyFor(level);
-        if (isLevelOnCooldown(levelKey, this.riskManager.dayState.levelCooldowns, Date.now(), CONFIG.strategyB.cooldownMinPerLevel)) {
-          if (justCrossed) this.logStrategyBSkip(level, direction, regimeInfo, "level_on_cooldown");
-          continue;
-        }
-        if (!checkProximity(priorBars, level.price, CONFIG.strategyB.proximity)) {
-          if (justCrossed) this.logStrategyBSkip(level, direction, regimeInfo, "proximity_not_met");
-          continue;
-        }
-
-        this.pendingB = {
-          direction,
-          level,
-          breakoutIndex: idx,
-          entryPrice: bar.close,
-          prevPrice: prevBar.close,
-          priorBars,
-          triggerLevels: this.levelState.triggerLevelsB,
-          regimeInfo,
-          flipPointEs: this.levelState.flipPointEs,
-          walls: this.levelState.wallsEs,
-          levels: this.levelState.levels,
-          nowET: t,
-          nowMs: Date.now(),
-        };
-        break;
-      }
-    }
-  }
-
   // Both the log buffer (for the dashboard's Recent Signals/Vetoes table)
-  // and Mongo (durable, survives a restart) — same two writes handleSignal
-  // already does, factored out so logStrategyBSkip can reuse it too.
+  // and Mongo (durable, survives a restart) — same two writes handleSignal uses.
   persistLogRow(row) {
     this.logger.log(row);
     tradeJournal.logSignal(row, nowET().toDateString()).catch((e) => console.error("Mongo log failed:", e.message));
-  }
-
-  // A level crossing Strategy B rejected before ever reaching handleSignal
-  // (cooldown or proximity) — visible now instead of silently indistinguishable
-  // from "nothing happened". Only called on the bar price actually transitions
-  // into triggering (see tryStrategyB), so this doesn't repeat every bar for as
-  // long as a fast move holds past the level.
-  logStrategyBSkip(level, direction, regimeInfo, vetoReason) {
-    this.persistLogRow(
-      buildLogRow({
-        ts: new Date().toISOString(),
-        strategy: "B",
-        direction,
-        level,
-        regime: regimeInfo?.regime ?? null,
-        netGex: this.gexSnapshot?.netGex ?? null,
-        flipPoint: this.levelState.flipPointEs,
-        vetoReason,
-      })
-    );
   }
 
   handleSignal(result, regimeInfo, flow) {
@@ -978,8 +764,6 @@ export class Worker {
       direction: result.direction,
       level: result.level ?? null,
       regime: regimeInfo?.regime ?? null,
-      netGex: this.gexSnapshot?.netGex ?? null,
-      flipPoint: this.levelState.flipPointEs,
       flowGrade: flow.grade,
       vetoReason,
       entryPrice: result.entryPrice ?? null,
@@ -990,19 +774,12 @@ export class Worker {
 
     if (vetoReason) return; // vetoes are logged only, no alert noise
 
-    // Ladder only applies to Strategy B (the real Combine, whose actual
-    // starting balance is known and calibrated — see config.js's
-    // sizing.ladder.startingEquity comment). The Order Flow Bot's practice
-    // account balance is arbitrary and not calibrated against this ladder,
-    // so it stays flat (ratio 1x, i.e. just its own base x wall multiplier)
-    // rather than risk the exact same class of oversizing bug against an
-    // unverified number.
-    let ratio = 1;
-    if (role === "default") {
-      const equity = this.account?.balance ?? CONFIG.risk.sizing.ladder.startingEquity;
-      ratio = ladderRatio(equity, CONFIG.risk.sizing.ladder);
-    }
-    const size = computeSizeMultiplier(flow.grade, result.sizeMultiplier, CONFIG.risk.sizing) * ratio;
+    // The Order Flow Bot is the only strategy left (Strategy B, the only one
+    // ever calibrated against the real Combine's equity ladder, was removed
+    // with GEX/FlashAlpha) — it trades its own practice account, whose
+    // balance is arbitrary and not calibrated against any ladder, so size is
+    // just its own base x wall multiplier, no equity scaling.
+    const size = computeSizeMultiplier(flow.grade, result.sizeMultiplier, CONFIG.risk.sizing);
     this.executeSignal(result, regimeInfo, flow, size).catch((e) =>
       console.error("Signal execution failed:", e.message)
     );
@@ -1010,16 +787,15 @@ export class Worker {
 
   markTraded(result) {
     if (result.strategy === "OF") this.riskManager.recordOrderFlowTrade(result.zoneKey, Date.now());
-    else if (result.strategy === "B") this.riskManager.recordStrategyBTrade(result.levelKey, Date.now());
   }
 
-  // Dynamic in-trade management: evaluateExit's four conditions
-  // (failed-breakout, delta-divergence, absorption, regime-flip) plus
-  // breakeven-at-1R, run against every open trade each bar. One action per
-  // trade per bar (actionInFlight guards against a slow-resolving broker
-  // call overlapping with the next bar's evaluation of the same trade).
-  // Trades from reconcileUntrackedPositions (entryIndex/brokenLevel unknown)
-  // are skipped — there isn't enough context to evaluate them safely.
+  // Dynamic in-trade management: evaluateOrderFlowExit's conditions
+  // (delta-divergence, absorption, trend-day trailing) plus breakeven-at-1R,
+  // run against every open trade each bar. One action per trade per bar
+  // (actionInFlight guards against a slow-resolving broker call overlapping
+  // with the next bar's evaluation of the same trade). Trades from
+  // reconcileUntrackedPositions (entryIndex/brokenLevel unknown) are skipped
+  // — there isn't enough context to evaluate them safely.
   evaluateOpenTrades(bar) {
     const currentIndex = this.bars.length - 1;
     for (const trade of [...this.trackedTrades]) {
@@ -1044,38 +820,22 @@ export class Worker {
 
       if (trade.brokenLevel == null) continue;
 
+      // The Order Flow Bot is the only strategy that reaches here now
+      // (Strategy B's evaluateExit was removed with GEX/FlashAlpha).
       const currentRegimeBase = this.lastRegimeInfo?.baseRegime ?? null;
       const absorption = buildAbsorptionWindow(this.bars, currentIndex, CONFIG.orderFlow.absorption);
-      const result =
-        trade.strategy === "OF"
-          ? evaluateOrderFlowExit({
-              direction: trade.direction,
-              entryIndex: trade.entryIndex,
-              currentIndex,
-              bars: this.bars,
-              touchWindow: absorption?.touchWindow ?? null,
-              priorBars: absorption?.priorBars ?? [],
-              levelPriceForAbsorption: trade.targetPrice,
-              isTrendDay: currentRegimeBase === "NEG_GAMMA",
-              nearestZonePrice: nearestZonePriceFor(this.lastFootprintZones ?? [], trade.direction, bar.close),
-              config: CONFIG,
-            })
-          : evaluateExit({
-              direction: trade.direction,
-              currentBar: bar,
-              brokenLevel: trade.brokenLevel,
-              entryIndex: trade.entryIndex,
-              currentIndex,
-              bars: this.bars,
-              inOpenSpace: isInOpenSpace(bar.close, trade.direction, this.levelState.wallsEs, CONFIG.levels.wallFilter),
-              prevRegimeBase: trade.lastRegimeBase,
-              currentRegimeBase,
-              touchWindow: absorption?.touchWindow ?? null,
-              priorBars: absorption?.priorBars ?? [],
-              levelPriceForAbsorption: trade.targetPrice,
-              config: CONFIG,
-            });
-      trade.lastRegimeBase = currentRegimeBase;
+      const result = evaluateOrderFlowExit({
+        direction: trade.direction,
+        entryIndex: trade.entryIndex,
+        currentIndex,
+        bars: this.bars,
+        touchWindow: absorption?.touchWindow ?? null,
+        priorBars: absorption?.priorBars ?? [],
+        levelPriceForAbsorption: trade.targetPrice,
+        isTrendDay: currentRegimeBase === "TREND",
+        nearestZonePrice: nearestZonePriceFor(this.lastFootprintZones ?? [], trade.direction, bar.close),
+        config: CONFIG,
+      });
       if (result.action === "HOLD") continue;
 
       trade.actionInFlight = true;
@@ -1362,7 +1122,6 @@ export class Worker {
         originalTargetPrice: result.targetPrice,
         brokenLevel: result.breakoutLevel ?? result.level?.price ?? null,
         entryIndex: this.bars.length - 1,
-        lastRegimeBase: this.lastRegimeInfo?.baseRegime ?? null,
         movedToBreakeven: false,
         actionInFlight: false,
         contractId,
@@ -1471,24 +1230,15 @@ async function startWorker() {
     intervalMs: 3000,
   });
 
-  worker.recalcGex().catch((e) => console.error("Initial GEX recalc failed:", e.message));
-  worker.recalcBasis().catch((e) => console.error("Initial basis recalc failed:", e.message));
-  // Awaited (not fire-and-forget like the recalcs above) — reconciliation
-  // needs a fresh read of real open positions to know what's genuinely still
-  // open vs. orphaned, so it must run after this specific poll resolves.
+  worker.checkDayRollover(nowET()); // triggers the initial ADX refresh
+  // Awaited (not fire-and-forget) — reconciliation needs a fresh read of real
+  // open positions to know what's genuinely still open vs. orphaned, so it
+  // must run after this specific poll resolves.
   await worker.pollAccount().catch((e) => console.error("Initial account poll failed:", e.message));
   await worker
     .reconcileOrphanedMongoTrades()
     .catch((e) => console.error("Orphaned trade reconciliation failed:", e.message));
 
-  setInterval(
-    () => worker.recalcGex().catch((e) => console.error("GEX recalc failed:", e.message)),
-    CONFIG.gexRecalcMin * 60_000
-  );
-  setInterval(
-    () => worker.recalcBasis().catch((e) => console.error("Basis recalc failed:", e.message)),
-    CONFIG.basisRecalcMin * 60_000
-  );
   setInterval(
     () => worker.pollAccount().catch((e) => console.error("Account poll failed:", e.message)),
     5000

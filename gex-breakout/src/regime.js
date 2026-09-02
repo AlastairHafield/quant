@@ -1,19 +1,12 @@
-export function classifyRegime({ netGex, price, flipPointEs, nearFlipPts }) {
-  const baseRegime = netGex < 0 ? "NEG_GAMMA" : "POS_GAMMA";
-  const nearFlip =
-    flipPointEs != null && Math.abs(price - flipPointEs) < nearFlipPts;
-  return {
-    baseRegime,
-    nearFlip,
-    regime: nearFlip ? "NEAR_FLIP" : baseRegime,
-  };
-}
-
-export function isFlipBreak(prevPrice, price, flipPointEs) {
-  if (flipPointEs == null) return false;
-  const wasBelow = prevPrice < flipPointEs;
-  const isAbove = price >= flipPointEs;
-  const wasAbove = prevPrice >= flipPointEs;
-  const isBelow = price < flipPointEs;
-  return (wasBelow && isAbove) || (wasAbove && isBelow);
+// TopstepX-only regime classification for the Order Flow Bot — replaces the
+// old net-GEX-derived NEG_GAMMA/POS_GAMMA split (GEX/FlashAlpha removed).
+// "TREND" (prior-day ADX >= threshold, same filter gap-continuation and
+// mechanical-orb already use) stands in for the old trending-day regime
+// (footprint continuation zones, no fixed TP); "RANGE" stands in for the old
+// mean-reversion regime (session value-area fade, contrarian target). See
+// orderFlowBot.js's buildActiveZones/isTrendDay and detectFailedAuction's
+// regime gate, all of which key off baseRegime by this same name.
+export function classifyRegime({ trendDayOk }) {
+  const baseRegime = trendDayOk ? "TREND" : "RANGE";
+  return { baseRegime, regime: baseRegime };
 }

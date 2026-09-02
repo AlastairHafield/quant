@@ -1,5 +1,6 @@
 import { CONFIG } from "./config.js";
 import { buildFootprintZones } from "./footprint.js";
+import { buildOrderFlowWalls } from "./levelEngine.js";
 import { topHeatmapZones, detectLargeRestingOrders } from "./depthBook.js";
 
 // Only a bar/depth-staleness THRESHOLD check (isBarStreamStale/
@@ -14,25 +15,16 @@ function recentlyEventedWithin(lastEventAt, maxAgeMin) {
 export function buildStatusPayload(worker) {
   const lastBar = worker.bars.length ? worker.bars[worker.bars.length - 1] : null;
   return {
-    signalOnly: !CONFIG.executionEnabled, // Strategy B (and everything but A) — the bot-wide switch
+    signalOnly: !CONFIG.executionEnabled, // the bot-wide switch (everything but the Order Flow Bot's own gate)
     instrumentTrade: CONFIG.instrumentTrade,
     instrumentData: CONFIG.instrumentData,
     lastPrice: lastBar?.close ?? null,
     barsToday: worker.bars.length,
     regime: worker.lastRegimeInfo?.regime ?? null,
-    gex: worker.gexSnapshot
-      ? {
-          netGex: worker.gexSnapshot.netGex,
-          confidence: worker.gexSnapshot.confidence,
-          asOf: worker.gexSnapshot.asOf,
-        }
-      : null,
-    flipPointEs: worker.levelState.flipPointEs,
-    wallsEs: worker.levelState.wallsEs,
-    basis: worker.basis,
-    basisAsOf: worker.basisAsOf ? worker.basisAsOf.toISOString() : null,
+    adx: worker.priorDayAdx,
+    adxOk: worker.priorDayAdxOk,
+    walls: buildOrderFlowWalls({ valueArea: worker.lastValueArea, poc: worker.lastPOC }),
     dayState: {
-      strategyBTradesToday: worker.riskManager.dayState.strategyBTradesToday,
       orderFlowTradesToday: worker.riskManager.dayState.orderFlowTradesToday,
       haltedStrategies: [...worker.riskManager.haltedStrategies],
       winsToday: worker.riskManager.winsToday,

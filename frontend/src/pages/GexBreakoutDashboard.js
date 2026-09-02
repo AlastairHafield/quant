@@ -2,17 +2,10 @@ import React, { useState, useEffect, useRef } from 'react';
 import { getGexBreakoutStatus } from '../api';
 
 const r = (n, d = 2) => typeof n === 'number' ? Math.round(n * 10 ** d) / 10 ** d : '—';
-const fmtGex = (v) => {
-  if (typeof v !== 'number') return '—';
-  const abs = Math.abs(v);
-  const s = abs >= 1e9 ? (v / 1e9).toFixed(2) + 'B' : (v / 1e6).toFixed(0) + 'M';
-  return (v >= 0 ? '+$' : '-$') + s.replace('-', '');
-};
 const fmtTime = (iso) => iso ? new Date(iso).toLocaleTimeString('en-US', { hour12: false }) : '—';
 const ageSec = (iso) => iso ? Math.round((Date.now() - new Date(iso).getTime()) / 1000) : null;
 
-const REGIME_CLASS = { NEG_GAMMA: 'pos', POS_GAMMA: 'neg' };
-const REGIME_STYLE_COLOR = { NEAR_FLIP: 'var(--yellow)' };
+const REGIME_CLASS = { TREND: 'pos', RANGE: 'neg' };
 
 export default function GexBreakoutDashboard() {
   const [status, setStatus] = useState(null);
@@ -45,7 +38,7 @@ export default function GexBreakoutDashboard() {
   if (waitingForFirstReport) {
     return (
       <div>
-        <p className="page-title">GEX Breakout — Strategy B (Live Dashboard)</p>
+        <p className="page-title">GEX Breakout — Order Flow Bot (Live Dashboard)</p>
         <div className="empty"><span className="spinner" /> Waiting for the worker's first status report...</div>
       </div>
     );
@@ -54,7 +47,7 @@ export default function GexBreakoutDashboard() {
   if (error && !status) {
     return (
       <div>
-        <p className="page-title">GEX Breakout — Strategy B (Live Dashboard)</p>
+        <p className="page-title">GEX Breakout — Order Flow Bot (Live Dashboard)</p>
         <div className="status error">Backend unreachable ({error}).</div>
       </div>
     );
@@ -63,19 +56,19 @@ export default function GexBreakoutDashboard() {
   if (!status) {
     return (
       <div>
-        <p className="page-title">GEX Breakout — Strategy B (Live Dashboard)</p>
+        <p className="page-title">GEX Breakout — Order Flow Bot (Live Dashboard)</p>
         <div className="empty"><span className="spinner" /> Connecting to worker...</div>
       </div>
     );
   }
 
   const stale = ageSec(status.updatedAt) > 15;
-  const bLog = (status.recentLog || []).filter((row) => row.strategy === 'B');
+  const ofLog = (status.recentLog || []).filter((row) => row.strategy === 'OF');
 
   return (
     <div>
       <p className="page-title">
-        GEX Breakout — Strategy B (Live Dashboard)
+        GEX Breakout — Order Flow Bot (Live Dashboard)
         {status.signalOnly && <span style={{ marginLeft: 10, color: 'var(--yellow)' }}>SIGNAL-ONLY MODE</span>}
         {stale && <span style={{ marginLeft: 10, color: 'var(--red)' }}>⚠ stale ({ageSec(status.updatedAt)}s)</span>}
       </p>
@@ -83,24 +76,25 @@ export default function GexBreakoutDashboard() {
       <div className="metrics-row">
         <div className="metric">
           <div className="metric-label">Regime</div>
-          <div className={`metric-value ${REGIME_CLASS[status.regime] ?? ''}`}
-               style={{ fontSize: 16, color: REGIME_STYLE_COLOR[status.regime] }}>
+          <div className={`metric-value ${REGIME_CLASS[status.regime] ?? ''}`} style={{ fontSize: 16 }}>
             {status.regime ?? '—'}
           </div>
         </div>
         <div className="metric">
-          <div className="metric-label">Net GEX</div>
-          <div className={`metric-value ${status.gex?.netGex > 0 ? 'neg' : status.gex?.netGex < 0 ? 'pos' : ''}`} style={{ fontSize: 16 }}>
-            {fmtGex(status.gex?.netGex)}
+          <div className="metric-label">Prior-day ADX</div>
+          <div className="metric-value" style={{ fontSize: 16 }}>
+            {r(status.adx, 1)} {status.adxOk ? '(trend-armed)' : ''}
           </div>
         </div>
         <div className="metric">
-          <div className="metric-label">Flip Point (ES)</div>
-          <div className="metric-value" style={{ fontSize: 16 }}>{r(status.flipPointEs)}</div>
+          <div className="metric-label">Value Area (High / Low)</div>
+          <div className="metric-value" style={{ fontSize: 16 }}>
+            {r(status.orderFlowDiagnostics?.valueArea?.high)} / {r(status.orderFlowDiagnostics?.valueArea?.low)}
+          </div>
         </div>
         <div className="metric">
-          <div className="metric-label">Basis (ES-SPX)</div>
-          <div className="metric-value" style={{ fontSize: 16 }}>{r(status.basis)}</div>
+          <div className="metric-label">POC</div>
+          <div className="metric-value" style={{ fontSize: 16 }}>{r(status.orderFlowDiagnostics?.poc)}</div>
         </div>
         <div className="metric">
           <div className="metric-label">Last {status.instrumentData} Price</div>
@@ -116,23 +110,21 @@ export default function GexBreakoutDashboard() {
 
       <div className="two-col">
         <div className="card">
-          <p className="card-title">Day State — Strategy B</p>
+          <p className="card-title">Day State — Order Flow Bot</p>
           <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
-            <Row label="Trades today" value={status.dayState.strategyBTradesToday} />
-            <Row label="W/L" value={`${status.dayState.winsToday?.B ?? 0}W / ${status.dayState.lossesToday?.B ?? 0}L`} />
+            <Row label="Trades today" value={status.dayState.orderFlowTradesToday} />
+            <Row label="W/L" value={`${status.dayState.winsToday?.OF ?? 0}W / ${status.dayState.lossesToday?.OF ?? 0}L`} />
             <Row
               label="Halted"
-              value={status.dayState.haltedStrategies?.includes('B') ? 'yes' : 'no'}
-              warn={status.dayState.haltedStrategies?.includes('B')}
+              value={status.dayState.haltedStrategies?.includes('OF') ? 'yes' : 'no'}
+              warn={status.dayState.haltedStrategies?.includes('OF')}
             />
           </div>
         </div>
 
         <div className="card">
-          <p className="card-title">GEX Walls (ES terms)</p>
-          <WallList label="Above spot" walls={status.wallsEs?.aboveSpot} />
-          <div style={{ height: 10 }} />
-          <WallList label="Below spot" walls={status.wallsEs?.belowSpot} />
+          <p className="card-title">Order Flow Walls (Value Area / POC)</p>
+          <WallList label="Levels" walls={status.walls?.aboveSpot} />
         </div>
       </div>
 
@@ -168,8 +160,8 @@ export default function GexBreakoutDashboard() {
       </div>
 
       <div className="card">
-        <p className="card-title">Recent Signals / Vetoes — Strategy B ({bLog.length})</p>
-        {bLog.length === 0 ? (
+        <p className="card-title">Recent Signals / Vetoes — Order Flow Bot ({ofLog.length})</p>
+        {ofLog.length === 0 ? (
           <div className="empty">No signal evaluations yet.</div>
         ) : (
           <div className="table-wrap" style={{ maxHeight: 420, overflowY: 'auto' }}>
@@ -181,7 +173,7 @@ export default function GexBreakoutDashboard() {
                 </tr>
               </thead>
               <tbody>
-                {bLog.map((row, i) => (
+                {ofLog.map((row, i) => (
                   <tr key={i}>
                     <td style={{ fontFamily: 'var(--mono)', fontSize: 11 }}>{fmtTime(row.ts)}</td>
                     <td>{row.direction && <span className={row.direction === 'long' ? 'tag-long' : 'tag-short'}>{row.direction}</span>}</td>
@@ -226,9 +218,8 @@ function WallList({ label, walls }) {
       ) : (
         walls.map((w, i) => (
           <div key={i} style={{ display: 'flex', justifyContent: 'space-between', padding: '3px 0' }}>
-            <span className={w.wallType === 'POS_WALL' ? 'tag-short' : 'tag-long'} style={{ fontSize: 11 }}>{w.wallType}</span>
             <span style={{ fontFamily: 'var(--mono)', fontSize: 11 }}>{r(w.strike, 1)}</span>
-            <span style={{ fontFamily: 'var(--mono)', fontSize: 10, color: 'var(--text3)' }}>{fmtGex(w.gex)}</span>
+            <span style={{ fontFamily: 'var(--mono)', fontSize: 10, color: 'var(--text3)' }}>{w.source ?? '—'}</span>
           </div>
         ))
       )}

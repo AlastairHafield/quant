@@ -1,9 +1,8 @@
-// The Order Flow Bot's own strategy orchestration. Deliberately does NOT
-// reuse checks.js's runChecks — that gate's POS_GAMMA/flip-break semantics
-// are breakout-specific (Strategy A/B trade a breakout past a level, only
-// "confirmed" in POS_GAMMA via a flip-break or explicit override) and wrong
-// for a strategy that trades BOTH regimes on purpose, fading toward the
-// flip in its own mean-reversion mode rather than needing to break past it.
+// The Order Flow Bot's own strategy orchestration. Regime here is a
+// TopstepX-only prior-day ADX classification (regime.js's classifyRegime) —
+// "TREND"/"RANGE" — replacing the old net-GEX NEG_GAMMA/POS_GAMMA split
+// (GEX/FlashAlpha removed). The Order Flow Bot trades BOTH regimes on
+// purpose, with a different zone set and target mode for each.
 
 import { timeCheck } from "./checks.js";
 import { directionalWallFilter } from "./levelEngine.js";
@@ -46,12 +45,12 @@ export function isZoneOnCooldown(zoneKey, cooldownMap, nowMs, cooldownMinutes) {
 }
 
 // One active zone set per regime, per the plan's design: footprint's stacked
-// buy/sell-imbalance zones on NEG_GAMMA (trend) days, the session value area
-// treated as a single zone on POS_GAMMA (mean-reversion) days. `side: null`
-// on the value-area zone — it isn't buy/sell-imbalanced the way a footprint
-// zone is, but the shared triggers below don't need a side, only low/high.
+// buy/sell-imbalance zones on TREND days, the session value area treated as
+// a single zone on RANGE (mean-reversion) days. `side: null` on the
+// value-area zone — it isn't buy/sell-imbalanced the way a footprint zone
+// is, but the shared triggers below don't need a side, only low/high.
 export function buildActiveZones(regimeInfo, { footprintZones, valueArea }) {
-  if (regimeInfo.baseRegime === "NEG_GAMMA") return footprintZones;
+  if (regimeInfo.baseRegime === "TREND") return footprintZones;
   if (!valueArea) return [];
   return [{ side: null, low: valueArea.low, high: valueArea.high }];
 }
@@ -131,10 +130,10 @@ export function evaluateOrderFlowBot(ctx) {
   let zone = null;
 
   // detectFailedAuction is volume-profile-specific (needs the value area
-  // directly, not a generic zone) — only meaningful on POS_GAMMA days, and
+  // directly, not a generic zone) — only meaningful on RANGE days, and
   // checked before everything else since it's the more decisive signal when
   // the value area itself has already rejected a probe.
-  if (regimeInfo.baseRegime === "POS_GAMMA" && valueArea) {
+  if (regimeInfo.baseRegime === "RANGE" && valueArea) {
     const failed = detectFailedAuction(bars, index, valueArea, config.orderFlowBot.volumeProfile);
     if (failed) {
       trigger = { direction: failed.direction, trigger: "failed_auction", entryPrice: bar.close };
@@ -227,7 +226,7 @@ export function evaluateOrderFlowBot(ctx) {
     return { strategy: "OF", direction: trigger.direction, zone, zoneKey, veto: "stop_exceeds_cap" };
   }
 
-  const isTrendDay = regimeInfo.baseRegime === "NEG_GAMMA";
+  const isTrendDay = regimeInfo.baseRegime === "TREND";
   let targetPrice, targetMode;
   if (isTrendDay) {
     // No fixed TP by design on trend days — orderFlowExits.js's

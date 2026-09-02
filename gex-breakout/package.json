@@ -3,7 +3,7 @@
   "version": "1.0.0",
   "private": true,
   "type": "module",
-  "description": "MES breakout system: GEX regime + ES order flow confirmed ORB/breakout signals, forward-test only",
+  "description": "MES order-flow system: ADX-regime footprint/volume-profile confirmed breakout and mean-reversion signals (the Order Flow Bot), TopstepX-only",
   "engines": {
     "node": "20.x"
   },

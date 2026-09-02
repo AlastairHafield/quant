@@ -5,8 +5,6 @@ import {
   shouldFlattenNow,
   tradesRequiringCloseOnFlip,
   untrackedPositions,
-  shiftWalls,
-  buildLevelState,
   shouldFlushLogNow,
   createWorker,
   isLiveExecutionAllowed,
@@ -15,7 +13,6 @@ import {
   isDepthStreamStale,
 } from "../src/worker.js";
 import { CONFIG } from "../src/config.js";
-import { levelKeyFor } from "../src/strategyB.js";
 
 test("minutesOf converts a Date to minutes-since-midnight", () => {
   assert.equal(minutesOf(new Date(2026, 6, 24, 9, 30)), 570);
@@ -30,13 +27,12 @@ test("isLiveExecutionAllowed: the Order Flow Bot needs its own separate flag on 
 
 test("accountRoleFor: the Order Flow Bot gets the practice-account role, everything else is 'default'", () => {
   assert.equal(accountRoleFor("OF"), "A");
-  assert.equal(accountRoleFor("B"), "default");
   assert.equal(accountRoleFor("reconciled"), "default");
 });
 
-test("isLiveExecutionAllowed: Strategy B (and anything else) just follows the bot-wide switch", () => {
-  assert.equal(isLiveExecutionAllowed("B", { executionEnabled: true, orderFlowBot: { executionEnabled: false } }), true);
-  assert.equal(isLiveExecutionAllowed("B", { executionEnabled: false, orderFlowBot: { executionEnabled: false } }), false);
+test("isLiveExecutionAllowed: anything but the Order Flow Bot just follows the bot-wide switch", () => {
+  assert.equal(isLiveExecutionAllowed("reconciled", { executionEnabled: true, orderFlowBot: { executionEnabled: false } }), true);
+  assert.equal(isLiveExecutionAllowed("reconciled", { executionEnabled: false, orderFlowBot: { executionEnabled: false } }), false);
 });
 
 test("isBarStreamStale: false outside the trading day, regardless of how old the last bar is", () => {
@@ -83,7 +79,7 @@ test("tradesRequiringCloseOnFlip: empty when no tracked trades exist for the con
 test("tradesRequiringCloseOnFlip: empty when every tracked trade on the contract already agrees with the new direction", () => {
   const trades = [
     { contractId: "CON.F.US.MES.U26", direction: "long", strategy: "OF" },
-    { contractId: "CON.F.US.MES.U26", direction: "long", strategy: "B" },
+    { contractId: "CON.F.US.MES.U26", direction: "long", strategy: "reconciled" },
   ];
   assert.deepEqual(tradesRequiringCloseOnFlip(trades, "CON.F.US.MES.U26", "long"), []);
 });
@@ -95,7 +91,7 @@ test("tradesRequiringCloseOnFlip: ignores trades on other contracts", () => {
 
 test("tradesRequiringCloseOnFlip: returns every tracked trade on the contract (not just the opposite-direction one) once any of them conflicts — a contract has only one real net position", () => {
   const trades = [
-    { contractId: "CON.F.US.MES.U26", direction: "short", strategy: "B" },
+    { contractId: "CON.F.US.MES.U26", direction: "short", strategy: "reconciled" },
     { contractId: "CON.F.US.MES.U26", direction: "long", strategy: "OF" }, // agrees with the new signal, but still shares the same net position
   ];
   const toClose = tradesRequiringCloseOnFlip(trades, "CON.F.US.MES.U26", "long");
@@ -125,57 +121,13 @@ test("untrackedPositions: empty when every open position is already tracked", ()
   assert.deepEqual(untrackedPositions(openPositions, trackedTrades), []);
 });
 
-test("shiftWalls: shifts every wall's strike by the basis, preserving wallType/gex", () => {
-  const walls = {
-    aboveSpot: [{ strike: 5525, gex: 5e9, wallType: "POS_WALL" }],
-    belowSpot: [{ strike: 5480, gex: -4e9, wallType: "NEG_WALL" }],
-  };
-  const shifted = shiftWalls(walls, 8);
-  assert.equal(shifted.aboveSpot[0].strike, 5533);
-  assert.equal(shifted.aboveSpot[0].wallType, "POS_WALL");
-  assert.equal(shifted.belowSpot[0].strike, 5488);
-});
-
-test("buildLevelState: returns an empty state before GEX/basis are available", () => {
-  const state = buildLevelState({ gexSnapshot: null, basis: null, dailyLevels: [], consolRange: null });
-  assert.deepEqual(state, {
-    levels: [],
-    triggerLevelsB: [],
-    flipPointEs: null,
-    wallsEs: { aboveSpot: [], belowSpot: [] },
-  });
-});
-
-test("buildLevelState: composes GEX/daily/consolidation levels, basis-shifted", () => {
-  const gexSnapshot = {
-    flipPoint: 5500,
-    walls: {
-      aboveSpot: [{ strike: 5525, gex: 5e9, wallType: "POS_WALL" }],
-      belowSpot: [{ strike: 5480, gex: -4e9, wallType: "NEG_WALL" }],
-    },
-  };
-  const state = buildLevelState({
-    gexSnapshot,
-    basis: 8,
-    dailyLevels: [{ type: "PRIOR_DAY_HIGH", price: 5540, role: "strategyB_trigger" }],
-    consolRange: { high: 5516, low: 5512 },
-  });
-
-  assert.equal(state.flipPointEs, 5508); // 5500 + 8
-  assert.equal(state.wallsEs.aboveSpot[0].strike, 5533);
-  assert.ok(state.levels.some((l) => l.type === "PRIOR_DAY_HIGH" && l.price === 5540));
-  assert.ok(state.levels.some((l) => l.type === "CONSOL_HIGH" && l.price === 5516));
-  assert.ok(state.triggerLevelsB.some((l) => l.type === "GEX_WALL"));
-});
-
 function esBar({ high, low, close, buyVolume, sellVolume }) {
   return { high, low, close, volume: buyVolume + sellVolume, buyVolume, sellVolume };
 }
 
-test("checkDayRollover: resets pending Strategy B breakouts and risk-manager day-state on a new calendar day", () => {
+test("checkDayRollover: resets risk-manager day-state and footprint bars on a new calendar day", () => {
   const worker = createWorker();
   worker.currentDay = new Date(2026, 6, 27).toDateString();
-  worker.pendingB = { direction: "short" };
   worker.riskManager.recordTradeResult("OF", -100); // a loss recorded yesterday
   worker.riskManager.recordOrderFlowTrade("zone1", Date.now());
   worker.footprintBars.push([{ price: 5500, buyVolume: 1, sellVolume: 1 }]);
@@ -183,7 +135,6 @@ test("checkDayRollover: resets pending Strategy B breakouts and risk-manager day
   worker.checkDayRollover(new Date(2026, 6, 28, 0, 1)); // just past midnight, a new day
 
   assert.equal(worker.currentDay, new Date(2026, 6, 28).toDateString());
-  assert.equal(worker.pendingB, null);
   assert.equal(worker.riskManager.lossesToday.OF, undefined); // lazily-initialized, resetDay clears the whole object
   assert.equal(worker.riskManager.dayState.orderFlowTradesToday, 0);
   assert.equal(worker.riskManager.dayState.zoneCooldowns.size, 0);
@@ -203,19 +154,19 @@ test("checkDayRollover: marks today's session as starting at this.bars' current 
 test("checkDayRollover: a no-op when called again the same day (doesn't wipe in-progress state)", () => {
   const worker = createWorker();
   worker.currentDay = new Date(2026, 6, 27).toDateString();
-  worker.pendingB = { direction: "short" };
+  worker.riskManager.recordOrderFlowTrade("zone1", Date.now());
 
   worker.checkDayRollover(new Date(2026, 6, 27, 9, 40)); // still the same day
 
-  assert.deepEqual(worker.pendingB, { direction: "short" });
+  assert.equal(worker.riskManager.dayState.orderFlowTradesToday, 1);
 });
 
 test("handleSignal: skips a new signal when the real account already has an open position (shared with other bots)", () => {
   const worker = createWorker();
   worker.openPositions = [{ contractId: "CON.F.US.MES.U26", size: 4 }]; // e.g. Mechanical ORB
-  const result = { strategy: "B", direction: "long", entryPrice: 5500, stopPrice: 5490, targetPrice: 5520, sizeMultiplier: 1 };
+  const result = { strategy: "reconciled", direction: "long", entryPrice: 5500, stopPrice: 5490, targetPrice: 5520, sizeMultiplier: 1 };
 
-  worker.handleSignal(result, { regime: "NEG_GAMMA" }, { grade: "A" });
+  worker.handleSignal(result, { regime: "TREND" }, { grade: "A" });
 
   const row = worker.logger.buffer[0];
   assert.equal(row.veto_reason, "position_already_open");
@@ -225,9 +176,9 @@ test("handleSignal: skips a new signal when the real account already has an open
 test("handleSignal: proceeds normally when the account is flat", () => {
   const worker = createWorker();
   worker.openPositions = [];
-  const result = { strategy: "B", direction: "long", entryPrice: 5500, stopPrice: 5490, targetPrice: 5520, sizeMultiplier: 1 };
+  const result = { strategy: "reconciled", direction: "long", entryPrice: 5500, stopPrice: 5490, targetPrice: 5520, sizeMultiplier: 1 };
 
-  worker.handleSignal(result, { regime: "NEG_GAMMA" }, { grade: "A" });
+  worker.handleSignal(result, { regime: "TREND" }, { grade: "A" });
 
   const row = worker.logger.buffer[0];
   assert.equal(row.veto_reason, null);
@@ -236,66 +187,47 @@ test("handleSignal: proceeds normally when the account is flat", () => {
 test("handleSignal: an already-open position takes priority over the strategy's own veto reason in the logged row", () => {
   const worker = createWorker();
   worker.openPositions = [{ contractId: "CON.F.US.MES.U26", size: 4 }];
-  const result = { strategy: "B", direction: "long", veto: "pos_gamma_no_confirmation", sizeMultiplier: 1 };
+  const result = { strategy: "reconciled", direction: "long", veto: "wall_too_close", sizeMultiplier: 1 };
 
-  worker.handleSignal(result, { regime: "POS_GAMMA" }, { grade: "A" });
+  worker.handleSignal(result, { regime: "RANGE" }, { grade: "A" });
 
   assert.equal(worker.logger.buffer[0].veto_reason, "position_already_open");
 });
 
 test("handleSignal: the Order Flow Bot checks its OWN (practice) account's positions, independent of the real account", () => {
   const worker = createWorker();
-  worker.openPositions = [{ contractId: "CON.F.US.MES.U26", size: 4 }]; // real account has something open (e.g. Strategy B)
+  worker.openPositions = [{ contractId: "CON.F.US.MES.U26", size: 4 }]; // real account has something open (e.g. another bot)
   worker.openPositionsA = []; // but the practice account is flat
   const result = { strategy: "OF", direction: "long", entryPrice: 5500, stopPrice: 5490, targetPrice: 5520, sizeMultiplier: 1 };
 
-  worker.handleSignal(result, { regime: "NEG_GAMMA" }, { grade: "A" });
+  worker.handleSignal(result, { regime: "TREND" }, { grade: "A" });
 
   assert.equal(worker.logger.buffer[0].veto_reason, null); // not blocked by the real account's unrelated position
 });
 
-test("handleSignal: Strategy B is unaffected by the Order Flow Bot's own practice-account position", () => {
+test("Worker end-to-end: the Order Flow Bot's own loss/win halt stops further trading for the day", () => {
   const worker = createWorker();
-  worker.openPositions = []; // real account is flat
-  worker.openPositionsA = [{ contractId: "CON.F.US.MES.U26", size: 4 }]; // practice account has something open
-  const result = { strategy: "B", direction: "long", entryPrice: 5500, stopPrice: 5490, targetPrice: 5520, sizeMultiplier: 1 };
-
-  worker.handleSignal(result, { regime: "NEG_GAMMA" }, { grade: "A" });
-
-  assert.equal(worker.logger.buffer[0].veto_reason, null); // not blocked by the Order Flow Bot's unrelated practice position
-});
-
-test("Worker end-to-end: a strategy's own loss/win halt stops further trading for the day", () => {
-  const worker = createWorker();
-  worker.gexSnapshot = { netGex: -5e9, flipPoint: 5400, walls: { aboveSpot: [], belowSpot: [] } };
-  worker.basis = 0;
-  worker.rebuildLevels();
 
   // Settle currentDay first — checkDayRollover (fired on the first onBar of
   // any fresh worker) resets riskManager.dayState, which would silently undo
-  // the halts recorded below if they were set up before the day was
-  // established.
+  // the halt recorded below if it were set up before the day was established.
   worker.onBar(esBar({ high: 5500, low: 5498, close: 5499, buyVolume: 10, sellVolume: 10 }), new Date(2026, 6, 24, 9, 46));
 
   worker.riskManager.recordTradeResult("OF", -100);
   worker.riskManager.recordTradeResult("OF", -50); // OF halted: 2 losses
-  worker.riskManager.recordTradeResult("B", 25); // B halted: 1 winner
   assert.equal(worker.riskManager.canTrade("OF"), false);
-  assert.equal(worker.riskManager.canTrade("B"), false);
 
   const sizeBefore = worker.logger.size;
   worker.onBar(
     esBar({ high: 5523, low: 5520, close: 5522, buyVolume: 300, sellVolume: 50 }),
     new Date(2026, 6, 24, 9, 47)
   );
-  assert.equal(worker.logger.size, sizeBefore); // both bail out on their own halt before evaluating any real trigger logic
+  assert.equal(worker.logger.size, sizeBefore); // tryOrderFlow bails on its own halt before evaluating any real trigger logic
 });
 
 test("Worker end-to-end: tryOrderFlow fires a real lack-of-participation signal against a live footprint zone", () => {
   const worker = createWorker();
-  worker.gexSnapshot = { netGex: -5e9, flipPoint: 5400, walls: { aboveSpot: [], belowSpot: [] } }; // NEG_GAMMA
-  worker.basis = 0;
-  worker.rebuildLevels();
+  worker.priorDayAdxOk = true; // TREND day -> stop/target routed through footprint zones, same as before
 
   // 4 flat-close bars (rules out path-of-least-resistance, which needs net
   // price movement) with volume declining by more than half and cumulative
@@ -337,9 +269,7 @@ test("Worker end-to-end: tryOrderFlow fires a real lack-of-participation signal 
 
 test("tryOrderFlow: logs a no_trigger_heartbeat row once, throttled by diagnosticHeartbeatMin", () => {
   const worker = createWorker();
-  worker.gexSnapshot = { netGex: -5e9, flipPoint: 5400, walls: { aboveSpot: [], belowSpot: [] } }; // NEG_GAMMA
-  worker.basis = 0;
-  worker.rebuildLevels();
+  worker.priorDayAdxOk = true; // TREND day
 
   // Too few bars for absorption/POLR/LOP to ever match (lookbackBars: 4) —
   // guarantees evaluateOrderFlowBot returns a bare null every time, the
@@ -349,8 +279,8 @@ test("tryOrderFlow: logs a no_trigger_heartbeat row once, throttled by diagnosti
   const heartbeats = () =>
     worker.logger.buffer.filter((r) => r.strategy === "OF" && r.veto_reason === "no_trigger_heartbeat");
   assert.equal(heartbeats().length, 1);
-  assert.equal(heartbeats()[0].regime, "NEG_GAMMA");
-  assert.equal(heartbeats()[0].delta_stats.baseRegime, "NEG_GAMMA");
+  assert.equal(heartbeats()[0].regime, "TREND");
+  assert.equal(heartbeats()[0].delta_stats.baseRegime, "TREND");
   assert.equal(heartbeats()[0].delta_stats.polr.matched, false);
   assert.equal(heartbeats()[0].delta_stats.polr.reason, "insufficient_bars");
   assert.equal(heartbeats()[0].delta_stats.lop.matched, false);
@@ -364,63 +294,6 @@ test("tryOrderFlow: logs a no_trigger_heartbeat row once, throttled by diagnosti
   worker.lastOFHeartbeatAt = Date.now() - 16 * 60000;
   worker.onBar(esBar({ high: 5502, low: 5500, close: 5501, buyVolume: 10, sellVolume: 10 }), new Date(2026, 6, 24, 9, 48));
   assert.equal(heartbeats().length, 2);
-});
-
-test("tryStrategyB: logs a proximity_not_met skip on a fast crossing, without repeating while it holds", () => {
-  const worker = createWorker();
-  worker.gexSnapshot = {
-    netGex: -5e9,
-    flipPoint: 5400,
-    walls: { aboveSpot: [{ strike: 5510, gex: -1e9, wallType: "NEG_WALL" }], belowSpot: [] },
-  };
-  worker.basis = 0;
-  worker.rebuildLevels();
-
-  // Bar 1: below the wall, just establishes a prevBar. Only 1 prior bar will
-  // exist for bar 2's own evaluation — checkProximity's own forMinutes(15)
-  // requirement fails on bar count alone, regardless of where price actually
-  // was, which is exactly the "moved too fast to have hovered near the level
-  // long enough" case this is meant to catch.
-  worker.onBar(esBar({ high: 5480, low: 5478, close: 5479, buyVolume: 10, sellVolume: 10 }), new Date(2026, 6, 24, 9, 46));
-  // Bar 2: straight through the wall (5510 + 1pt buffer).
-  worker.onBar(esBar({ high: 5515, low: 5479, close: 5512, buyVolume: 50, sellVolume: 10 }), new Date(2026, 6, 24, 9, 47));
-
-  const skipRows = worker.logger.buffer.filter((r) => r.veto_reason === "proximity_not_met");
-  assert.equal(skipRows.length, 1);
-  assert.equal(skipRows[0].direction, "long");
-  assert.equal(worker.pendingB, null); // never qualified, no pending breakout either
-
-  // Bar 3: still beyond the wall — direction unchanged from bar 2 — must not
-  // log again while the same crossing episode holds.
-  worker.onBar(esBar({ high: 5516, low: 5511, close: 5513, buyVolume: 20, sellVolume: 5 }), new Date(2026, 6, 24, 9, 48));
-  assert.equal(worker.logger.buffer.filter((r) => r.veto_reason === "proximity_not_met").length, 1);
-});
-
-test("tryStrategyB: logs a level_on_cooldown skip, taking priority over the proximity check", () => {
-  const worker = createWorker();
-  worker.gexSnapshot = {
-    netGex: -5e9,
-    flipPoint: 5400,
-    walls: { aboveSpot: [{ strike: 5510, gex: -1e9, wallType: "NEG_WALL" }], belowSpot: [] },
-  };
-  worker.basis = 0;
-  worker.rebuildLevels();
-  const level = worker.levelState.triggerLevelsB.find((l) => l.price === 5510);
-
-  // Seeded AFTER the first onBar, not before — the first onBar of any
-  // session triggers checkDayRollover (currentDay starts null), which wipes
-  // levelCooldowns; in real operation a level only ever gets recorded after
-  // rollover has already happened.
-  worker.onBar(esBar({ high: 5480, low: 5478, close: 5479, buyVolume: 10, sellVolume: 10 }), new Date(2026, 6, 24, 9, 46));
-  worker.riskManager.recordStrategyBTrade(levelKeyFor(level), Date.now()); // this level just traded
-
-  worker.onBar(esBar({ high: 5515, low: 5479, close: 5512, buyVolume: 50, sellVolume: 10 }), new Date(2026, 6, 24, 9, 47));
-
-  // Scoped to strategy "B" — tryOrderFlow also runs on both these bars and
-  // logs its own no_trigger_heartbeat row (no footprint zones/POC yet).
-  const skipRows = worker.logger.buffer.filter((r) => r.strategy === "B" && r.veto_reason != null);
-  assert.equal(skipRows.length, 1);
-  assert.equal(skipRows[0].veto_reason, "level_on_cooldown");
 });
 
 test("tryOrderFlow: promotes POC/value area to instance fields once minSessionBars is cleared", () => {
@@ -438,7 +311,7 @@ test("tryOrderFlow: promotes POC/value area to instance fields once minSessionBa
     worker.bars[lastIdx - 1],
     lastIdx,
     new Date(2026, 6, 24, 10, 0),
-    { baseRegime: "NEG_GAMMA", regime: "NEG_GAMMA" }
+    { baseRegime: "TREND", regime: "TREND" }
   );
 
   assert.notEqual(worker.lastPOC, null);
@@ -451,8 +324,8 @@ test("tryOrderFlow: leaves POC/value area null while the session is still thin",
   worker.bars.push({ high: 5501, low: 5499, close: 5500, buyVolume: 10, sellVolume: 10, cumDelta: 0 });
   worker.todaySessionStartIndex = 0;
   worker.tryOrderFlow(worker.bars[0], worker.bars[0], 0, new Date(2026, 6, 24, 10, 0), {
-    baseRegime: "NEG_GAMMA",
-    regime: "NEG_GAMMA",
+    baseRegime: "TREND",
+    regime: "TREND",
   });
 
   assert.equal(worker.lastPOC, null);
@@ -468,31 +341,28 @@ test("executeSignal: clamps a too-tight stop to the broker's minimum distance, e
     strategy: "OF", direction: "long", entryPrice: 5500, stopPrice: 5499.9, targetPrice: 5510,
     zoneKey: "buy:5498.00-5500.00", sizeMultiplier: 1,
   };
-  await worker.executeSignal(result, { regime: "NEG_GAMMA" }, { grade: "B" }, 2);
+  await worker.executeSignal(result, { regime: "TREND" }, { grade: "B" }, 2);
   assert.equal(result.stopPrice, 5499);
 });
 
 test("executeSignal: leaves an already-adequate stop untouched", async () => {
   const worker = createWorker();
   const result = {
-    strategy: "B", direction: "short", entryPrice: 5500, stopPrice: 5510, targetPrice: 5480,
+    strategy: "OF", direction: "short", entryPrice: 5500, stopPrice: 5510, targetPrice: 5480,
     level: { price: 5500 }, sizeMultiplier: 1,
   };
-  await worker.executeSignal(result, { regime: "NEG_GAMMA" }, { grade: "B" }, 2);
+  await worker.executeSignal(result, { regime: "TREND" }, { grade: "B" }, 2);
   assert.equal(result.stopPrice, 5510);
 });
 
 test("evaluateSignals: does not evaluate before sessionOpenET (pre-market)", () => {
   const worker = createWorker();
-  worker.gexSnapshot = { netGex: -5e9, flipPoint: 5400, walls: { aboveSpot: [], belowSpot: [] } };
-  worker.basis = 0;
-  worker.rebuildLevels();
 
   // 2:04am ET, matching the real pre-market trade this gate was added to
   // prevent (2026-07-30, after Phase 1 removed the old orbLocked gate that
   // used to block this as a side effect). lastRegimeInfo only ever gets set
   // once evaluateSignals runs past the time gates, so it staying null proves
-  // the gate stopped it before regime classification, let alone either strategy.
+  // the gate stopped it before regime classification.
   worker.onBar(
     esBar({ high: 5523, low: 5520, close: 5522, buyVolume: 300, sellVolume: 50 }),
     new Date(2026, 6, 24, 2, 4)
@@ -502,9 +372,6 @@ test("evaluateSignals: does not evaluate before sessionOpenET (pre-market)", () 
 
 test("evaluateSignals: still does not evaluate during the first 15 minutes of RTH (9:30-9:44)", () => {
   const worker = createWorker();
-  worker.gexSnapshot = { netGex: -5e9, flipPoint: 5400, walls: { aboveSpot: [], belowSpot: [] } };
-  worker.basis = 0;
-  worker.rebuildLevels();
 
   worker.onBar(
     esBar({ high: 5523, low: 5520, close: 5522, buyVolume: 300, sellVolume: 50 }),
@@ -515,9 +382,6 @@ test("evaluateSignals: still does not evaluate during the first 15 minutes of RT
 
 test("evaluateSignals: evaluates normally at/after entryFloorET (9:45)", () => {
   const worker = createWorker();
-  worker.gexSnapshot = { netGex: -5e9, flipPoint: 5400, walls: { aboveSpot: [], belowSpot: [] } };
-  worker.basis = 0;
-  worker.rebuildLevels();
 
   worker.onBar(
     esBar({ high: 5523, low: 5520, close: 5522, buyVolume: 300, sellVolume: 50 }),
@@ -526,11 +390,8 @@ test("evaluateSignals: evaluates normally at/after entryFloorET (9:45)", () => {
   assert.notEqual(worker.lastRegimeInfo, null); // reached regime classification — the gate let it through
 });
 
-test("evaluateSignals: a risk halt blocks both strategies, logged distinctly from a data-health veto", () => {
+test("evaluateSignals: a risk halt blocks the Order Flow Bot, logged distinctly from a normal veto", () => {
   const worker = createWorker();
-  worker.gexSnapshot = { netGex: -5e9, flipPoint: 5400, walls: { aboveSpot: [], belowSpot: [] } };
-  worker.basis = 0;
-  worker.rebuildLevels();
   worker.haltedForRisk = true;
   worker.haltReason = "daily_loss_cap (pnl -1200.00)";
 
@@ -539,7 +400,7 @@ test("evaluateSignals: a risk halt blocks both strategies, logged distinctly fro
     new Date(2026, 6, 24, 9, 45)
   );
 
-  assert.equal(worker.lastRegimeInfo, null); // never reached regime classification / tryOrderFlow / tryStrategyB
+  assert.equal(worker.lastRegimeInfo, null); // never reached regime classification / tryOrderFlow
   assert.equal(worker.logger.buffer.at(-1).veto_reason, "risk_halt:daily_loss_cap (pnl -1200.00)");
 });
 
@@ -592,9 +453,6 @@ test("tripRiskHalt: sets the halt flag synchronously and attempts to flatten eve
 
 test("Worker: onBar routes to the EOD flatten path (skips evaluateSignals) once past flattenAtET with an open trade", () => {
   const worker = createWorker();
-  worker.gexSnapshot = { netGex: -5e9, flipPoint: 5400, walls: { aboveSpot: [], belowSpot: [] } };
-  worker.basis = 0;
-  worker.rebuildLevels();
   worker.trackedTrades.push({
     strategy: "OF", direction: "long", entryPrice: 5520, stopPrice: 5515, targetPrice: 5540,
     contractId: "CON.F.US.EP.U26", size: 4, orderId: 1, mfe: 0, mae: 0, openedAt: "t",
@@ -610,9 +468,6 @@ test("Worker: onBar routes to the EOD flatten path (skips evaluateSignals) once 
 
 test("Worker: onBar does not take the flatten path when there's nothing open (falls through to evaluateSignals)", () => {
   const worker = createWorker();
-  worker.gexSnapshot = { netGex: -5e9, flipPoint: 5400, walls: { aboveSpot: [], belowSpot: [] } };
-  worker.basis = 0;
-  worker.rebuildLevels();
 
   // Confirms flattenAll() is never reached with an empty trackedTrades (no
   // broker call attempted, nothing thrown synchronously).
@@ -652,35 +507,13 @@ test("Worker: onFootprintBar accumulates levels and records the last-received ti
   assert.equal(worker.footprintBars.length, 2);
 });
 
-test("Worker: evaluateOpenTrades dispatches a non-HOLD evaluateExit result (failed breakout) for a tracked trade", () => {
-  const worker = createWorker();
-  worker.onBar(esBar({ high: 5501, low: 5499, close: 5500, buyVolume: 50, sellVolume: 50 }), new Date(2026, 6, 24, 10, 0));
-  const entryIndex = worker.bars.length - 1;
-  worker.trackedTrades.push({
-    strategy: "B", direction: "long", entryPrice: 5500, stopPrice: 5490, originalStopPrice: 5490,
-    targetPrice: 5520, originalTargetPrice: 5520, brokenLevel: 5500, entryIndex, lastRegimeBase: "NEG_GAMMA",
-    movedToBreakeven: true, actionInFlight: false, contractId: "CON.F.US.EP.U26", size: 4, orderId: 1,
-    mfe: 0, mae: 0, openedAt: "t",
-  });
-
-  // Strategy B routes through the generic evaluateExit. Closes below
-  // brokenLevel(5500) - failedBreakoutPts(2) = 5498 -> EXIT_NOW.
-  // executionEnabled is false in tests, so the real broker call inside
-  // actOnExitResult rejects (no credentials) and is caught asynchronously —
-  // actionInFlight being true immediately after onBar (set synchronously,
-  // before that rejection settles) is exactly what proves evaluateOpenTrades
-  // correctly identified a non-HOLD result and dispatched it.
-  worker.onBar(esBar({ high: 5497, low: 5495, close: 5496, buyVolume: 10, sellVolume: 40 }), new Date(2026, 6, 24, 10, 1));
-  assert.equal(worker.trackedTrades[0].actionInFlight, true);
-});
-
 test("Worker: evaluateOpenTrades leaves a healthy trade alone (HOLD)", () => {
   const worker = createWorker();
   worker.onBar(esBar({ high: 5501, low: 5499, close: 5500, buyVolume: 50, sellVolume: 50 }), new Date(2026, 6, 24, 10, 0));
   const entryIndex = worker.bars.length - 1;
   worker.trackedTrades.push({
-    strategy: "B", direction: "long", entryPrice: 5500, stopPrice: 5490, originalStopPrice: 5490,
-    targetPrice: 5520, originalTargetPrice: 5520, brokenLevel: 5500, entryIndex, lastRegimeBase: "NEG_GAMMA",
+    strategy: "OF", direction: "long", entryPrice: 5500, stopPrice: 5490, originalStopPrice: 5490,
+    targetPrice: 5520, originalTargetPrice: 5520, brokenLevel: 5500, entryIndex,
     movedToBreakeven: true, actionInFlight: false, contractId: "CON.F.US.EP.U26", size: 4, orderId: 1,
     mfe: 0, mae: 0, openedAt: "t",
   });
@@ -693,19 +526,19 @@ test("Worker: evaluateOpenTrades dispatches TIGHTEN_TO_PRICE for an Order Flow B
   const worker = createWorker();
   worker.onBar(esBar({ high: 5501, low: 5499, close: 5500, buyVolume: 50, sellVolume: 50 }), new Date(2026, 6, 24, 10, 0));
   const entryIndex = worker.bars.length - 1;
-  worker.lastRegimeInfo = { baseRegime: "NEG_GAMMA" }; // trend day -> trail instead of a fixed TP
+  worker.lastRegimeInfo = { baseRegime: "TREND" }; // trend day -> trail instead of a fixed TP
   worker.lastFootprintZones = [{ side: "buy", low: 5490, high: 5495 }]; // below price -> eligible to trail behind for a long
   worker.trackedTrades.push({
     strategy: "OF", direction: "long", entryPrice: 5500, stopPrice: 5480, originalStopPrice: 5480,
-    targetPrice: 6000, originalTargetPrice: 6000, brokenLevel: 5500, entryIndex, lastRegimeBase: "NEG_GAMMA",
+    targetPrice: 6000, originalTargetPrice: 6000, brokenLevel: 5500, entryIndex,
     movedToBreakeven: true, actionInFlight: false, contractId: "CON.F.US.EP.U26", size: 4, orderId: 1,
     mfe: 0, mae: 0, openedAt: "t",
   });
 
   // stopPrice(5480) sits well below the zone's high(5495) -> TIGHTEN_TO_PRICE
   // moves it up to 5495, which is tighter, so actOnExitResult dispatches —
-  // proven the same way the EXIT_NOW test above does (actionInFlight set
-  // synchronously before the broker call's rejection settles).
+  // proven by actionInFlight being set synchronously before the broker
+  // call's rejection settles (no credentials in this test environment).
   worker.onBar(esBar({ high: 5503, low: 5501, close: 5502, buyVolume: 50, sellVolume: 50 }), new Date(2026, 6, 24, 10, 1));
   assert.equal(worker.trackedTrades[0].actionInFlight, true);
 });
@@ -713,7 +546,7 @@ test("Worker: evaluateOpenTrades dispatches TIGHTEN_TO_PRICE for an Order Flow B
 test("Worker: detectClosedTrades logs a closed-trade row (with MFE/MAE) once the broker no longer reports the position", async () => {
   const worker = createWorker();
   worker.trackedTrades.push({
-    strategy: "B", direction: "short", entryPrice: 5500, stopPrice: 5510, targetPrice: 5470,
+    strategy: "OF", direction: "short", entryPrice: 5500, stopPrice: 5510, targetPrice: 5470,
     contractId: "CON.F.US.EP.U26", size: 2, orderId: 42, mfe: 15, mae: 4, openedAt: "t",
   });
   worker.bars.push({ close: 5486 });
@@ -724,7 +557,7 @@ test("Worker: detectClosedTrades logs a closed-trade row (with MFE/MAE) once the
   assert.equal(worker.trackedTrades.length, 0);
   const row = worker.logger.buffer.find((r) => r.outcome === "closed");
   assert.ok(row, "expected a closed-trade log row");
-  assert.equal(row.strategy, "B");
+  assert.equal(row.strategy, "OF");
   assert.equal(row.direction, "short");
   assert.equal(row.mfe, 15);
   assert.equal(row.mae, 4);
@@ -735,24 +568,24 @@ test("Worker: a closed trade feeds the per-strategy win/loss halt — a losing c
   const worker = createWorker();
 
   worker.trackedTrades.push({
-    strategy: "B", direction: "long", entryPrice: 5500, stopPrice: 5490, targetPrice: 5520,
+    strategy: "OF", direction: "long", entryPrice: 5500, stopPrice: 5490, targetPrice: 5520,
     contractId: "CON.F.US.EP.U26", size: 2, orderId: 1, mfe: 0, mae: 10, openedAt: "t",
   });
   worker.bars.push({ close: 5492 }); // long, exited below entry -> a loss
   worker.openPositions = [];
   await worker.detectClosedTrades();
-  assert.equal(worker.riskManager.lossesToday.B, 1);
-  assert.equal(worker.riskManager.canTrade("B"), true); // 1 loss, cap is 2
+  assert.equal(worker.riskManager.lossesToday.OF, 1);
+  assert.equal(worker.riskManager.canTrade("OF"), true); // 1 loss, cap is 2
 
   worker.trackedTrades.push({
-    strategy: "B", direction: "long", entryPrice: 5500, stopPrice: 5490, targetPrice: 5520,
+    strategy: "OF", direction: "long", entryPrice: 5500, stopPrice: 5490, targetPrice: 5520,
     contractId: "CON.F.US.EP.U26", size: 2, orderId: 2, mfe: 20, mae: 0, openedAt: "t",
   });
   worker.bars.push({ close: 5515 }); // long, exited above entry -> a win
   worker.openPositions = [];
   await worker.detectClosedTrades();
-  assert.equal(worker.riskManager.winsToday.B, 1);
-  assert.equal(worker.riskManager.canTrade("B"), false); // one winner and done for the day
+  assert.equal(worker.riskManager.winsToday.OF, 1);
+  assert.equal(worker.riskManager.canTrade("OF"), false); // one winner and done for the day
 });
 
 test("Worker: detectClosedTrades leaves a trade tracked while the broker still reports a matching position", async () => {
@@ -771,7 +604,7 @@ test("Worker: detectClosedTrades leaves a trade tracked while the broker still r
 test("detectClosedTrades: checks each tracked trade against its OWN account role's positions, not the other account's", async () => {
   const worker = createWorker();
   worker.trackedTrades = [
-    { accountRole: "default", strategy: "B", direction: "long", entryPrice: 5500, stopPrice: 5490, targetPrice: 5520, contractId: "CON.F.US.MES.U26", size: 2, orderId: 1, mfe: 0, mae: 0, openedAt: "t" },
+    { accountRole: "default", strategy: "reconciled", direction: "long", entryPrice: 5500, stopPrice: 5490, targetPrice: 5520, contractId: "CON.F.US.MES.U26", size: 2, orderId: 1, mfe: 0, mae: 0, openedAt: "t" },
     { accountRole: "A", strategy: "OF", direction: "long", entryPrice: 5500, stopPrice: 5490, targetPrice: 5520, contractId: "CON.F.US.MES.U26", size: 2, orderId: 2, mfe: 0, mae: 0, openedAt: "t" },
   ];
   worker.bars.push({ close: 5510 });
@@ -852,7 +685,7 @@ test("logClosedTrade: a manual_close outcome is logged distinctly and still feed
   const fakeClient = { resolveAccountId: async () => "acct1", fetchClosingTrades: async () => [] };
   await worker.logClosedTrade(
     {
-      strategy: "B",
+      strategy: "OF",
       direction: "long",
       entryPrice: 5500,
       mfe: 8,
@@ -864,7 +697,7 @@ test("logClosedTrade: a manual_close outcome is logged distinctly and still feed
     "manual_close",
     fakeClient
   );
-  assert.equal(worker.riskManager.winsToday.B, 1);
+  assert.equal(worker.riskManager.winsToday.OF, 1);
   const row = worker.logger.buffer.find((r) => r.outcome === "manual_close");
   assert.ok(row, "expected a manual_close log row");
 });
@@ -881,7 +714,7 @@ test("logClosedTrade: uses the broker's real closing fill(s) instead of the bar-
   };
   await worker.logClosedTrade(
     {
-      strategy: "B",
+      strategy: "OF",
       direction: "long",
       entryPrice: 5500,
       mfe: 0,
@@ -896,7 +729,7 @@ test("logClosedTrade: uses the broker's real closing fill(s) instead of the bar-
   const row = worker.logger.buffer.find((r) => r.outcome === "closed");
   assert.equal(row.approx_exit_price, 5490); // last closing fill's price, not the bar close
   assert.equal(row.realized_pnl, -75); // sum of both closing fills' real P&L
-  assert.equal(worker.riskManager.lossesToday.B, 1); // correctly counted as a loss, not the fake win the bar close would imply
+  assert.equal(worker.riskManager.lossesToday.OF, 1); // correctly counted as a loss, not the fake win the bar close would imply
 });
 
 test("logClosedTrade: falls back to the bar-close approximation when the real-fill lookup fails", async () => {
@@ -908,13 +741,13 @@ test("logClosedTrade: falls back to the bar-close approximation when the real-fi
     },
   };
   await worker.logClosedTrade(
-    { strategy: "B", direction: "long", entryPrice: 5500, mfe: 8, mae: 0, mongoId: null, contractId: "CON.F.US.EP.U26", openedAt: new Date().toISOString() },
+    { strategy: "OF", direction: "long", entryPrice: 5500, mfe: 8, mae: 0, mongoId: null, contractId: "CON.F.US.EP.U26", openedAt: new Date().toISOString() },
     "closed",
     fakeClient
   );
   const row = worker.logger.buffer.find((r) => r.outcome === "closed");
   assert.equal(row.approx_exit_price, 5508);
-  assert.equal(worker.riskManager.winsToday.B, 1);
+  assert.equal(worker.riskManager.winsToday.OF, 1);
 });
 
 test("reconcileOrphanedMongoTrades: closes a Mongo-open trade the broker no longer shows open, using its real fills", async () => {
@@ -959,7 +792,7 @@ test("reconcileOrphanedMongoTrades: leaves a trade alone if the broker still rep
   worker.openPositionsA = [];
   const fakeJournal = {
     fetchOpenTrades: async () => [
-      { _id: "doc1", strategy: "B", accountRole: "default", contractId: "CON.F.US.MES.U26", openedAt: new Date().toISOString() },
+      { _id: "doc1", strategy: "reconciled", accountRole: "default", contractId: "CON.F.US.MES.U26", openedAt: new Date().toISOString() },
     ],
     closeTrade: async () => assert.fail("should not close a trade the broker still reports open"),
   };
@@ -974,7 +807,7 @@ test("reconcileOrphanedMongoTrades: leaves a trade alone if no closing fill is f
   worker.openPositionsA = [];
   const fakeJournal = {
     fetchOpenTrades: async () => [
-      { _id: "doc1", strategy: "B", accountRole: "default", contractId: "CON.F.US.MES.U26", openedAt: new Date().toISOString() },
+      { _id: "doc1", strategy: "reconciled", accountRole: "default", contractId: "CON.F.US.MES.U26", openedAt: new Date().toISOString() },
     ],
     closeTrade: async () => assert.fail("should not close without a real closing fill to base it on"),
   };
