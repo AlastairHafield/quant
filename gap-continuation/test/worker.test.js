@@ -1,6 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { createWorker, shouldFlushLogNow, findUntrackedPosition } from "../src/worker.js";
+import { CONFIG } from "../src/config.js";
 
 function bar(open, high, low, close) {
   return { open, high, low, close };
@@ -65,6 +66,58 @@ test("handleSignal: proceeds normally when the account is flat", () => {
   worker.handleSignal({ direction: "long", entryPrice: 101.1, stopPrice: 100.5, targetPrice: 102, gapPct: 0.01 });
 
   assert.equal(worker.logger.buffer[0].veto_reason, null);
+});
+
+test("handleSignal: a risk halt vetoes new entries even when the account is otherwise flat", () => {
+  const worker = primedWorker({ priorClose: 100 });
+  worker.openPositions = [];
+  worker.haltedForRisk = true;
+  worker.haltReason = "daily_loss_cap (pnl -600.00)";
+
+  worker.handleSignal({ direction: "long", entryPrice: 101.1, stopPrice: 100.5, targetPrice: 102, gapPct: 0.01 });
+
+  assert.equal(worker.logger.buffer[0].veto_reason, "risk_halt:daily_loss_cap (pnl -600.00)");
+  assert.equal(worker.openPosition, null);
+});
+
+test("checkAccountRisk: breaching the account-wide daily loss cap halts new entries for the rest of the day", async () => {
+  const worker = primedWorker({ priorClose: 100 });
+  const originalCap = CONFIG.risk.dailyLossCapDollars;
+  CONFIG.risk.dailyLossCapDollars = 500;
+  try {
+    worker.account = { balance: 50000 };
+    await worker.checkAccountRisk(new Date(2026, 6, 27, 10, 0)); // snapshots dayStartBalance
+    assert.equal(worker.haltedForRisk, false);
+
+    worker.account = { balance: 49400 }; // down $600, past the $500 cap
+    await worker.checkAccountRisk(new Date(2026, 6, 27, 10, 5));
+    assert.equal(worker.haltedForRisk, true);
+    assert.match(worker.haltReason, /daily_loss_cap/);
+  } finally {
+    CONFIG.risk.dailyLossCapDollars = originalCap;
+  }
+});
+
+test("tripRiskHalt: flattens an open position immediately rather than waiting for the next entry attempt", async () => {
+  const worker = primedWorker({ priorClose: 100 });
+  worker.openPosition = {
+    direction: "long",
+    entryPrice: 101,
+    stopPrice: 100.5,
+    targetPrice: 102,
+    size: 1,
+    contractId: "CON.F.US.MES.U26",
+    mfe: 0,
+    mae: 0,
+    mongoId: null,
+  };
+  worker.bars = [bar(101, 101.3, 100.9, 101.2)];
+
+  await worker.tripRiskHalt("kill_switch");
+
+  assert.equal(worker.openPosition, null);
+  assert.equal(worker.haltedForRisk, true);
+  assert.equal(worker.logger.buffer.at(-1).outcome, "risk_halt");
 });
 
 test("Worker: a gap UP with ADX confirmed opens a LONG position (signal-only mode)", () => {

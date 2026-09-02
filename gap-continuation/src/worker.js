@@ -10,11 +10,13 @@ import {
 } from "./strategy.js";
 import { computeSize } from "./sizing.js";
 import { SignalLogger, buildLogRow } from "./logger.js";
-import { buildTradeTakenEmbed, postDiscordEmbed, flushLogBufferToDiscord } from "./discord.js";
+import { buildTradeTakenEmbed, buildSignalEmbed, postDiscordEmbed, flushLogBufferToDiscord } from "./discord.js";
 import { startStatusReporter } from "./statusReporter.js";
 import { updateMfeMae, computeRealizedPnl } from "./positionTracking.js";
 import * as topstepx from "./dataSources/topstepx.js";
 import * as tradeJournal from "./tradeJournal.js";
+import { isKillSwitchActive } from "../../shared/killSwitch.js";
+import { computeDailyPnl, isDailyLossCapBreached } from "../../shared/accountRisk.js";
 
 // ProjectX Gateway position type: 1 = Long, 2 = Short — confirmed live on the
 // other two bots by cross-checking a position's type against the direction
@@ -61,6 +63,10 @@ export class Worker {
     this.account = null;
     this.openPositions = [];
     this.accountAsOf = null;
+    this.riskDayKey = null;
+    this.dayStartBalance = null;
+    this.haltedForRisk = false;
+    this.haltReason = null;
   }
 
   async refreshAdx() {
@@ -90,8 +96,57 @@ export class Worker {
     this.account = account;
     this.openPositions = positions;
     this.accountAsOf = new Date();
+    await this.checkAccountRisk(nowET()).catch((e) => console.error("Risk check failed:", e.message));
     await this.reconcileUntrackedPosition().catch((e) => console.error("Reconcile failed:", e.message));
     this.detectClosedTrade();
+  }
+
+  // Account-wide safety net, independent of this bot's own signal logic —
+  // checked every account poll (not just at entry time) so a breach mid-trade
+  // still forces an immediate flatten rather than waiting for the next entry
+  // attempt to notice. dayStartBalance is snapshotted from the broker's own
+  // balance the first time it's seen each day; a restart mid-session
+  // re-snapshots "now" as the day's start, the same known limitation
+  // reconcileUntrackedPosition already has for stop/target recovery.
+  async checkAccountRisk(t) {
+    const dayKey = t.toDateString();
+    if (this.riskDayKey !== dayKey) {
+      this.riskDayKey = dayKey;
+      this.dayStartBalance = this.account?.balance ?? null;
+      this.haltedForRisk = false;
+      this.haltReason = null;
+    }
+
+    if (await isKillSwitchActive()) {
+      await this.tripRiskHalt("kill_switch");
+      return;
+    }
+
+    const dailyPnl = computeDailyPnl(this.account?.balance ?? null, this.dayStartBalance);
+    if (isDailyLossCapBreached(dailyPnl, CONFIG.risk.dailyLossCapDollars)) {
+      await this.tripRiskHalt(`daily_loss_cap (pnl ${dailyPnl?.toFixed(2)})`);
+    }
+  }
+
+  async tripRiskHalt(reason) {
+    const alreadyHalted = this.haltedForRisk;
+    this.haltedForRisk = true;
+    this.haltReason = reason;
+    if (this.openPosition) {
+      await this.flatten(this.bars.length ? this.bars[this.bars.length - 1].close : this.openPosition.entryPrice, "risk_halt");
+    }
+    if (alreadyHalted) return; // alert once per trip, not every poll
+    console.error(`RISK HALT (gap-continuation): ${reason}`);
+    await postDiscordEmbed(
+      CONFIG.discord.webhook,
+      buildSignalEmbed({
+        title: "🛑 RISK HALT — Gap Continuation",
+        description: `All new entries blocked for the rest of the day: **${reason}**`,
+        color: 0xe74c3c,
+        fields: [["Day", this.riskDayKey]],
+        footerText: `gap-continuation · ${new Date().toISOString()}`,
+      })
+    ).catch((e) => console.error("Risk-halt Discord post failed:", e.message));
   }
 
   // this.openPosition only ever exists in this process's memory, built up by
@@ -247,7 +302,11 @@ export class Worker {
     // every poll), so this catches a position opened by another bot too, not
     // just this one's own (which onBar's `if (this.openPosition) return`
     // already short-circuits before evaluateEntry is even called).
-    const vetoReason = this.openPositions.length > 0 ? "position_already_open" : result.veto;
+    const vetoReason = this.haltedForRisk
+      ? `risk_halt:${this.haltReason}`
+      : this.openPositions.length > 0
+        ? "position_already_open"
+        : result.veto;
 
     const row = buildLogRow({
       ts: new Date().toISOString(),
@@ -331,14 +390,14 @@ export class Worker {
     );
   }
 
-  async flatten(lastPrice) {
+  async flatten(lastPrice, reason = "eod_flatten") {
     if (!this.openPosition) return;
     if (CONFIG.executionEnabled) {
       const accountId = await topstepx.resolveAccountId();
       await topstepx.closePositionAndCancelOrders(accountId, this.openPosition.contractId);
     }
-    console.log(`Flattening EOD: ${this.openPosition.direction} @ ~${lastPrice}`);
-    this.logClosedTrade(this.openPosition, "eod_flatten");
+    console.log(`Flattening (${reason}): ${this.openPosition.direction} @ ~${lastPrice}`);
+    this.logClosedTrade(this.openPosition, reason);
     this.openPosition = null;
   }
 }
@@ -372,6 +431,11 @@ async function subscribeBarsWithRetry(worker, attempt = 1) {
 async function startWorker() {
   const worker = createWorker();
   console.log(`gap-continuation worker starting — signal-only mode: ${!CONFIG.executionEnabled}`);
+  if (CONFIG.risk.dailyLossCapDollars == null) {
+    console.error(
+      "WARNING: ACCOUNT_DAILY_LOSS_CAP_DOLLARS is not set — the account-wide daily loss cap is NOT enforced."
+    );
+  }
 
   startStatusReporter(worker, {
     backendUrl: CONFIG.backendUrl,

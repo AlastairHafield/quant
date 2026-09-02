@@ -1,6 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { createWorker, shouldFlushLogNow } from "../src/worker.js";
+import { CONFIG } from "../src/config.js";
 
 function bar(high, low, close) {
   return { high, low, close };
@@ -78,6 +79,56 @@ test("handleSignal: proceeds normally when the account is flat", () => {
   worker.handleSignal({ direction: "long", entryPrice: 5522, stopPrice: 5518 });
 
   assert.equal(worker.logger.buffer[0].veto_reason, null);
+});
+
+test("handleSignal: a risk halt vetoes new entries even when the account is otherwise flat", () => {
+  const worker = primedWorker({ adxOk: true });
+  worker.openPositions = [];
+  worker.haltedForRisk = true;
+  worker.haltReason = "kill_switch";
+
+  worker.handleSignal({ direction: "long", entryPrice: 5522, stopPrice: 5518 });
+
+  assert.equal(worker.logger.buffer[0].veto_reason, "risk_halt:kill_switch");
+  assert.equal(worker.dayState.tradedToday, false);
+});
+
+test("checkAccountRisk: breaching the account-wide daily loss cap halts new entries for the rest of the day", async () => {
+  const worker = primedWorker({ adxOk: true });
+  const originalCap = CONFIG.risk.dailyLossCapDollars;
+  CONFIG.risk.dailyLossCapDollars = 500;
+  try {
+    worker.account = { balance: 50000 };
+    await worker.checkAccountRisk(new Date(2026, 6, 24, 10, 0)); // snapshots dayStartBalance
+    assert.equal(worker.haltedForRisk, false);
+
+    worker.account = { balance: 49400 }; // down $600, past the $500 cap
+    await worker.checkAccountRisk(new Date(2026, 6, 24, 10, 5));
+    assert.equal(worker.haltedForRisk, true);
+    assert.match(worker.haltReason, /daily_loss_cap/);
+  } finally {
+    CONFIG.risk.dailyLossCapDollars = originalCap;
+  }
+});
+
+test("tripRiskHalt: flattens an open position immediately rather than waiting for the next entry attempt", async () => {
+  const worker = primedWorker({ adxOk: true });
+  worker.openPosition = {
+    direction: "long",
+    entryPrice: 5522,
+    stopPrice: 5518,
+    size: 1,
+    contractId: "CON.F.US.MES.U26",
+    mfe: 0,
+    mae: 0,
+    mongoId: null,
+  };
+
+  await worker.tripRiskHalt("kill_switch");
+
+  assert.equal(worker.openPosition, null);
+  assert.equal(worker.haltedForRisk, true);
+  assert.equal(worker.logger.buffer.at(-1).outcome, "risk_halt");
 });
 
 test("Worker: once a position is open, subsequent bars don't re-evaluate entries (one trade per day)", () => {

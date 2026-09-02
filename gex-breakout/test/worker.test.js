@@ -526,6 +526,70 @@ test("evaluateSignals: evaluates normally at/after entryFloorET (9:45)", () => {
   assert.notEqual(worker.lastRegimeInfo, null); // reached regime classification — the gate let it through
 });
 
+test("evaluateSignals: a risk halt blocks both strategies, logged distinctly from a data-health veto", () => {
+  const worker = createWorker();
+  worker.gexSnapshot = { netGex: -5e9, flipPoint: 5400, walls: { aboveSpot: [], belowSpot: [] } };
+  worker.basis = 0;
+  worker.rebuildLevels();
+  worker.haltedForRisk = true;
+  worker.haltReason = "daily_loss_cap (pnl -1200.00)";
+
+  worker.onBar(
+    esBar({ high: 5523, low: 5520, close: 5522, buyVolume: 300, sellVolume: 50 }),
+    new Date(2026, 6, 24, 9, 45)
+  );
+
+  assert.equal(worker.lastRegimeInfo, null); // never reached regime classification / tryOrderFlow / tryStrategyB
+  assert.equal(worker.logger.buffer.at(-1).veto_reason, "risk_halt:daily_loss_cap (pnl -1200.00)");
+});
+
+test("checkAccountRisk: breaching the account-wide daily loss cap halts new entries for the rest of the day", async () => {
+  const worker = createWorker();
+  const originalCap = CONFIG.risk.dailyLossCapDollars;
+  CONFIG.risk.dailyLossCapDollars = 500;
+  try {
+    worker.account = { balance: 50000 };
+    await worker.checkAccountRisk(new Date(2026, 6, 24, 10, 0)); // snapshots dayStartBalance
+    assert.equal(worker.haltedForRisk, false);
+
+    worker.account = { balance: 49400 }; // down $600, past the $500 cap
+    await worker.checkAccountRisk(new Date(2026, 6, 24, 10, 5));
+    assert.equal(worker.haltedForRisk, true);
+    assert.match(worker.haltReason, /daily_loss_cap/);
+  } finally {
+    CONFIG.risk.dailyLossCapDollars = originalCap;
+  }
+});
+
+test("tripRiskHalt: sets the halt flag synchronously and attempts to flatten every tracked trade", async () => {
+  const worker = createWorker();
+  worker.trackedTrades.push({
+    strategy: "OF",
+    accountRole: "A",
+    direction: "long",
+    entryPrice: 5520,
+    stopPrice: 5515,
+    targetPrice: 5540,
+    contractId: "CON.F.US.EP.U26",
+    size: 4,
+    orderId: 1,
+    mfe: 0,
+    mae: 0,
+    openedAt: "t",
+  });
+
+  // flattenAll() genuinely hits the broker here (trackedTrades is only ever
+  // populated when execution was live — see its own comment), so a real
+  // TopstepX credential/network failure in this test environment is expected;
+  // what matters is the halt flag is set BEFORE that call, not contingent on
+  // its outcome, same resilience posture as every other pollAccount()-driven
+  // check in this file.
+  await worker.tripRiskHalt("kill_switch").catch(() => {});
+
+  assert.equal(worker.haltedForRisk, true);
+  assert.equal(worker.haltReason, "kill_switch");
+});
+
 test("Worker: onBar routes to the EOD flatten path (skips evaluateSignals) once past flattenAtET with an open trade", () => {
   const worker = createWorker();
   worker.gexSnapshot = { netGex: -5e9, flipPoint: 5400, walls: { aboveSpot: [], belowSpot: [] } };

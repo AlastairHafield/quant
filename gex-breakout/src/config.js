@@ -189,6 +189,14 @@ export const CONFIG = {
   },
 
   risk: {
+    // Account-WIDE cap in $ on the real Combine (role "default", shared with
+    // gap-continuation and mechanical-orb) — NOT applied to the Order Flow
+    // Bot's practice account (role "A"), which isn't real money. See
+    // shared/accountRisk.js. Not set = unenforced (worker.js logs a startup
+    // warning so this can't silently be "off" without anyone noticing).
+    dailyLossCapDollars: process.env.ACCOUNT_DAILY_LOSS_CAP_DOLLARS
+      ? Number(process.env.ACCOUNT_DAILY_LOSS_CAP_DOLLARS)
+      : null,
     recalcSettle: {
       flipMoveThresholdPts: 5,
       noEntryMinutesAfterRecalc: 1,

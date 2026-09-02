@@ -52,6 +52,8 @@ import {
 import * as topstepx from "./dataSources/topstepx.js";
 import * as flashalpha from "./dataSources/flashalpha.js";
 import * as tradeJournal from "./tradeJournal.js";
+import { isKillSwitchActive } from "../../shared/killSwitch.js";
+import { computeDailyPnl, isDailyLossCapBreached } from "../../shared/accountRisk.js";
 
 export function toET(d) {
   return new Date(d.toLocaleString("en-US", { timeZone: "America/New_York" }));
@@ -230,6 +232,10 @@ export class Worker {
     this.accountA = null; // the Order Flow Bot's own (practice) account — role "A"
     this.openPositionsA = [];
     this.accountAsOf = null;
+    this.riskDayKey = null;
+    this.dayStartBalance = null; // "default" role (real Combine) only — see checkAccountRisk
+    this.haltedForRisk = false;
+    this.haltReason = null;
     this.trackedTrades = []; // locally-tracked open trades, for MFE/MAE + closure detection
     this.lastBarReceivedAt = null; // real wall-clock time — see isBarStreamStale
     this.footprintBars = []; // per-minute footprint levels, from FootprintBarAggregator — see onFootprintBar
@@ -266,8 +272,57 @@ export class Worker {
   async pollAccount() {
     await Promise.all([this.pollAccountForRole("default"), this.pollAccountForRole("A")]);
     this.accountAsOf = new Date();
+    await this.checkAccountRisk(nowET()).catch((e) => console.error("Risk check failed:", e.message));
     await this.detectClosedTrades();
     await this.reconcileUntrackedPositions();
+  }
+
+  // Account-wide safety net, independent of Strategy B/OF's own signal logic —
+  // checked every account poll (not just at entry time) so a breach mid-trade
+  // still forces an immediate flatten rather than waiting for the next entry
+  // attempt to notice. The kill switch halts BOTH strategies (both accounts);
+  // the $ daily-loss cap only applies to the "default" role (the real Combine,
+  // shared with gap-continuation/mechanical-orb) — the Order Flow Bot's
+  // practice account isn't real money, so it has no $ cap of its own here.
+  async checkAccountRisk(t) {
+    const dayKey = t.toDateString();
+    if (this.riskDayKey !== dayKey) {
+      this.riskDayKey = dayKey;
+      this.dayStartBalance = this.account?.balance ?? null;
+      this.haltedForRisk = false;
+      this.haltReason = null;
+    }
+
+    if (await isKillSwitchActive()) {
+      await this.tripRiskHalt("kill_switch");
+      return;
+    }
+
+    const dailyPnl = computeDailyPnl(this.account?.balance ?? null, this.dayStartBalance);
+    if (isDailyLossCapBreached(dailyPnl, CONFIG.risk.dailyLossCapDollars)) {
+      await this.tripRiskHalt(`daily_loss_cap (pnl ${dailyPnl?.toFixed(2)})`);
+    }
+  }
+
+  async tripRiskHalt(reason) {
+    const alreadyHalted = this.haltedForRisk;
+    this.haltedForRisk = true;
+    this.haltReason = reason;
+    if (this.trackedTrades.length) {
+      await this.flattenAll();
+    }
+    if (alreadyHalted) return; // alert once per trip, not every poll
+    console.error(`RISK HALT (gex-breakout): ${reason}`);
+    await postDiscordEmbed(
+      CONFIG.discord.logWebhook,
+      buildSignalEmbed({
+        title: "🛑 RISK HALT — GEX Breakout",
+        description: `All new entries (Strategy B and OF) blocked for the rest of the day: **${reason}**`,
+        color: 0xe74c3c,
+        fields: [["Day", this.riskDayKey]],
+        footerText: `gex-breakout · ${new Date().toISOString()}`,
+      })
+    ).catch((e) => console.error("Risk-halt Discord post failed:", e.message));
   }
 
   async pollAccountForRole(role) {
@@ -653,6 +708,11 @@ export class Worker {
     const minutes = minutesOf(t);
     if (minutes < CONFIG.entryFloorET.h * 60 + CONFIG.entryFloorET.m) return;
     if (minutes >= CONFIG.entryCutoffET.h * 60 + CONFIG.entryCutoffET.m) return;
+
+    if (this.haltedForRisk) {
+      this.logger.log(buildLogRow({ ts: new Date().toISOString(), vetoReason: `risk_halt:${this.haltReason}` }));
+      return;
+    }
 
     if (this.basisAsOf) {
       const health = checkDataHealth({
@@ -1399,6 +1459,11 @@ async function subscribeBarsWithRetry(worker, attempt = 1) {
 async function startWorker() {
   const worker = createWorker();
   console.log(`gex-breakout worker starting — signal-only mode: ${!CONFIG.executionEnabled}`);
+  if (CONFIG.risk.dailyLossCapDollars == null) {
+    console.error(
+      "WARNING: ACCOUNT_DAILY_LOSS_CAP_DOLLARS is not set — the account-wide daily loss cap is NOT enforced."
+    );
+  }
 
   startStatusReporter(worker, {
     backendUrl: process.env.BACKEND_URL || "http://localhost:3001",

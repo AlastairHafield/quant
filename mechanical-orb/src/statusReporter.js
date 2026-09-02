@@ -11,6 +11,9 @@ export function buildStatusPayload(worker) {
     adx: worker.priorDayAdx,
     adxOk: worker.priorDayAdxOk,
     tradedToday: worker.dayState.tradedToday,
+    haltedForRisk: worker.haltedForRisk,
+    haltReason: worker.haltReason,
+    dayStartBalance: worker.dayStartBalance,
     account: worker.account
       ? { id: worker.account.id, name: worker.account.name, balance: worker.account.balance }
       : null,

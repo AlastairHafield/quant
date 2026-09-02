@@ -8,6 +8,9 @@ export function buildStatusPayload(worker) {
     adx: worker.priorDayAdx,
     adxOk: worker.priorDayAdxOk,
     todayGapChecked: worker.todayGapChecked,
+    haltedForRisk: worker.haltedForRisk,
+    haltReason: worker.haltReason,
+    dayStartBalance: worker.dayStartBalance,
     openPosition: worker.openPosition
       ? {
           direction: worker.openPosition.direction,

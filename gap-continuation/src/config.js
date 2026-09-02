@@ -52,6 +52,16 @@ export const CONFIG = {
 
   accountNameHint: process.env.GAP_CONTINUATION_ACCOUNT_NAME || null,
 
+  risk: {
+    // Account-WIDE cap in $, shared across every bot trading this same real
+    // Combine (gap-continuation, mechanical-orb, gex-breakout's Strategy B) —
+    // see shared/accountRisk.js. Not set = unenforced (worker.js logs a
+    // startup warning so this can't silently be "off" without anyone noticing).
+    dailyLossCapDollars: process.env.ACCOUNT_DAILY_LOSS_CAP_DOLLARS
+      ? Number(process.env.ACCOUNT_DAILY_LOSS_CAP_DOLLARS)
+      : null,
+  },
+
   discord: {
     webhook: process.env.DISCORD_WEBHOOK || null,
     logWebhook: process.env.LOG_WEBHOOK || null,
