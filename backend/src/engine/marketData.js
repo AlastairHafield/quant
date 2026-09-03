@@ -151,6 +151,52 @@ export function buildRegimeMap(dailyBars, vixBars) {
   return regime;
 }
 
+// 1-minute bars carrying real per-minute aggressor buy/sell volume (tick_volume_1m,
+// joined onto the OHLCV bars_1m/Databento cache by date+ny_time), plus the same
+// prior-day ADX regime map every other engine uses. Deliberately refuses to run on
+// plain OHLCV with no real tick-derived volume — orderFlowBacktest.js's entire
+// premise is aggressor buy/sell volume (delta, absorption, path-of-least-resistance),
+// so silently backtesting against fabricated/zero volume would produce a result that
+// looks real but means nothing. There is currently no producer for tick_volume_1m
+// (see db.js) — this will return `error` until one exists and has been run for the
+// requested range.
+export async function loadOrderFlowBars(symbol, dateFrom, dateTo, params = {}) {
+  const { getTickVolume1m } = await import('../data/db.js');
+  const fetchFrom = format(addDays(parseISO(dateFrom), -7), 'yyyy-MM-dd');
+  const warmupFrom = format(addDays(parseISO(dateFrom), -300), 'yyyy-MM-dd');
+
+  const [ohlcvBars, tickVolRows, daily, vix] = await Promise.all([
+    loadIntradayBars(symbol, fetchFrom, dateTo, params.apiKey, params.timeframe || '1m-databento'),
+    Promise.resolve(getTickVolume1m(symbol, dateFrom, dateTo)),
+    loadDaily(symbol, warmupFrom, dateTo),
+    loadDaily('^VIX', warmupFrom, dateTo),
+  ]);
+
+  if (tickVolRows.length === 0) {
+    return {
+      bars: [], regimeMap: {},
+      error: `No per-minute buy/sell volume cached for ${symbol} ${dateFrom}..${dateTo} (tick_volume_1m has no rows in this range). The Order Flow backtest refuses to substitute plain OHLCV volume, since its entire premise is aggressor buy/sell volume — a Databento-trades-schema producer needs to populate tick_volume_1m for this range first.`,
+    };
+  }
+
+  const volByKey = new Map();
+  for (const r of tickVolRows) volByKey.set(`${r.date}|${r.ny_time}`, r);
+
+  // Any minute with no real tick-derived volume is dropped rather than
+  // backfilled with zeros/nulls-as-zero — a silent zero would read to the
+  // order-flow logic as "no one traded," which is a fabricated signal, not
+  // a faithful gap.
+  const bars = ohlcvBars
+    .filter((b) => b.date >= dateFrom && b.date <= dateTo)
+    .map((b) => {
+      const v = volByKey.get(`${b.date}|${b.ny_time}`);
+      return v ? { ...b, buyVolume: v.buy_volume, sellVolume: v.sell_volume } : null;
+    })
+    .filter(Boolean);
+
+  return { bars, regimeMap: buildRegimeMap(daily, vix) };
+}
+
 // Intraday bars + a prior-day regime map (trend/ADX/ATR-percentile/VIX) for a
 // symbol over a date range — the combination every backtest engine in this app
 // needs before it can run its own strategy-specific core loop.

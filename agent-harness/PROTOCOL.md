@@ -133,6 +133,7 @@ All endpoints return `{ success: bool, data?: ..., error?: string }`.
 | Raw trades (optionally by system/day) | `GET /api/ledger/trades?system=<db-name>&dayKey=...` |
 | ORB backtest / sweep / walk-forward | `POST /api/orb/backtest/run`, `/api/orb/sweep/run`, `/api/orb/walkforward/run` |
 | Gap-fill backtest / sweep / walk-forward | `POST /api/gapfill/backtest/run`, `/api/gapfill/sweep/run`, `/api/gapfill/walkforward/run` |
+| Order Flow Bot backtest (data-gated — see below) | `POST /api/orderflow/backtest/run` |
 | Live-vs-backtest drift for one strategy | `POST /api/reconciliation/run` — body: `{ system, closedFrom, closedTo, backtestStats, tolerances? }` (system is the Mongo db name: `gex_breakout` \| `mechanical_orb` \| `gap_continuation`; backtestStats is a backtest run's `metrics.full` or `.oos`) |
 | Evaluate the promotion gate | `POST /api/promotion-gate/evaluate` — body: `{ walkForward, regime, deflated, shadowDays, criteria? }` |
 | Get the (unexecuted) promotion command | `POST /api/promotion-gate/action` — body: `{ strategy, gateResult }` |
@@ -144,12 +145,31 @@ All endpoints return `{ success: bool, data?: ..., error?: string }`.
 ↔ `gex_breakout`. The promotion gate's `strategy` argument uses the
 directory-name form (see `backend/src/engine/promotionAction.js`'s mapping).
 
-There is **no backtest engine yet for gex-breakout's order-flow logic** —
-`orbBacktest.js`/`gapFillBacktest.js` only cover the other two strategies.
-If your thesis needs one, building it (against real historical L2/footprint
-data — verify what's actually available before assuming) is itself a
-legitimate proposal. Don't backtest order-flow ideas against a data source
-you haven't confirmed matches what's live.
+**`backend/src/engine/orderFlowBacktest.js`** backtests the Order Flow Bot by
+calling gex-breakout's own live `evaluateOrderFlowBot`/`evaluateOrderFlowExit`
+directly (not a reimplementation) via `POST /api/orderflow/backtest/run`
+(`{ symbol, dateFrom, dateTo, ...params }`, same response shape as
+`/orb/backtest/run`). Read the file's header comment before trusting any
+result from it — two honest, load-bearing gaps:
+
+1. **It needs real per-minute aggressor buy/sell volume** (`tick_volume_1m`
+   in `db.js`) — there is currently no producer for that table, so this will
+   return `{ success:false, error: "No per-minute buy/sell volume cached..." }`
+   for any range that hasn't been populated. Building that producer (a
+   Databento trades-schema fetcher with aggressor-side classification) is
+   itself a legitimate proposal if a thesis needs it — but verify the
+   classification is correct before trusting anything backtested on top of
+   it; a subtly wrong aggressor side would silently corrupt every delta/
+   absorption signal downstream.
+2. **No footprint-zone data exists**, so `footprintZones` is always `[]`:
+   trend-day trades in this backtest run to their stop or a far placeholder
+   target instead of trailing behind a footprint zone (the live behavior),
+   and zone absorption only fires on RANGE days against the session value
+   area. Don't compare a TREND-day backtest number against live P&L without
+   accounting for this — they are not measuring the same exit logic.
+
+There is deliberately no `/sweep` or `/walkforward` route for this engine yet
+— get the core validated against real data first.
 
 Read `backend/src/engine/backtestMetrics.js`, `robustness.js`,
 `reconciliation.js`, and `promotionGate.js` directly if any of the above is

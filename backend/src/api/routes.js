@@ -6,6 +6,7 @@ import { runSDBacktest } from '../engine/sdBacktest.js';
 import { runMRBacktest, runMRSweep } from '../engine/mrBacktest.js';
 import { runORBBacktest, runORBSweep, runORBWalkForward } from '../engine/orbBacktest.js';
 import { runGapFillBacktest, runGapFillSweep, runGapFillWalkForward } from '../engine/gapFillBacktest.js';
+import { runOrderFlowBacktest } from '../engine/orderFlowBacktest.js';
 import { parsePineScriptParams } from '../engine/parsePineScript.js';
 import { getBacktestRuns, getBacktestTrades, getEarningsEvents, removeStock, getSDRuns, getSDTrades, getMRRuns, getMRRun, getMRTrades, getMRSweep, getORBRuns, getORBRun, getORBTrades, getORBSweep, getGapFillRuns, getGapFillRun, getGapFillTrades, getGapFillSweep } from '../data/db.js';
 import { setGexBreakoutStatus, getGexBreakoutStatus } from '../data/gexBreakoutStatus.js';
@@ -436,6 +437,28 @@ router.get('/gapfill/sweeps/:sweepId', (req, res) => {
   try {
     res.json({ success: true, data: getGapFillSweep(req.params.sweepId) });
   } catch (e) {
+    res.status(500).json({ success: false, error: e.message });
+  }
+});
+
+// === ORDER FLOW BOT BACKTEST (gex-breakout's "OF") ===
+// Reuses gex-breakout's own live decision code directly (see
+// orderFlowBacktest.js's header) rather than a reimplementation — deliberately
+// no /sweep or /walkforward route yet, and no SQLite run persistence, until
+// this core engine has been run against real tick_volume_1m data and someone
+// has confirmed it actually matches live (see marketData.js's
+// loadOrderFlowBars, which currently refuses to run without that data).
+router.post('/orderflow/backtest/run', async (req, res) => {
+  const { symbol, dateFrom, dateTo, ...params } = req.body;
+  if (!symbol || !dateFrom || !dateTo) {
+    return res.status(400).json({ success: false, error: 'symbol, dateFrom, and dateTo are required' });
+  }
+  try {
+    const result = await runOrderFlowBacktest(symbol.toUpperCase(), dateFrom, dateTo, params);
+    if (result.error) return res.json({ success: false, error: result.error });
+    res.json({ success: true, data: result });
+  } catch (e) {
+    console.error('Order Flow backtest failed:', e);
     res.status(500).json({ success: false, error: e.message });
   }
 });
