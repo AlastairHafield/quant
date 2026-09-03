@@ -11,6 +11,7 @@ import { buildFootprintZones } from "./footprint.js";
 import { buildSessionProfile, findPOC, computeValueArea } from "./volumeProfile.js";
 import * as depthBook from "./depthBook.js";
 import { startStatusReporter } from "./statusReporter.js";
+import { createTickVolumeBuffer, bufferTickVolumeBar, startTickVolumeReporter } from "./tickVolumeReporter.js";
 import { SignalLogger, buildLogRow } from "./logger.js";
 import {
   postDiscordEmbed,
@@ -188,6 +189,7 @@ export class Worker {
     this.lastPOC = null; // ditto — null until sessionBars clears minSessionBars
     this.lastValueArea = null; // ditto
     this.lastOFHeartbeatAt = null; // real wall-clock ms — throttles logOrderFlowHeartbeat, see tryOrderFlow
+    this.tickVolumeBuffer = createTickVolumeBuffer(); // see tickVolumeReporter.js — durable capture of onBar's own buy/sell volume
     // Index into this.bars where TODAY's bars start — this.bars itself is
     // never trimmed at day rollover (multi-day history is fine for most uses,
     // e.g. MFE/MAE on a trade spanning a restart), but the session volume
@@ -555,6 +557,7 @@ export class Worker {
     const delta = rawBar.buyVolume - rawBar.sellVolume;
     const bar = { ...rawBar, delta, cumDelta: prevCum + delta };
     this.bars.push(bar);
+    bufferTickVolumeBar(this.tickVolumeBuffer, t, rawBar);
 
     for (const trade of this.trackedTrades) {
       Object.assign(trade, updateMfeMae(trade, trade.entryPrice, trade.direction, bar));
@@ -1231,6 +1234,12 @@ async function startWorker() {
     backendUrl: process.env.BACKEND_URL || "http://localhost:3001",
     secret: process.env.GEX_STATUS_SECRET,
     intervalMs: 3000,
+  });
+
+  startTickVolumeReporter(worker.tickVolumeBuffer, CONFIG.instrumentData, {
+    backendUrl: process.env.BACKEND_URL || "http://localhost:3001",
+    secret: process.env.GEX_STATUS_SECRET,
+    intervalMs: 30_000,
   });
 
   worker.checkDayRollover(nowET()); // triggers the initial ADX refresh

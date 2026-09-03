@@ -152,15 +152,20 @@ directly (not a reimplementation) via `POST /api/orderflow/backtest/run`
 `/orb/backtest/run`). Read the file's header comment before trusting any
 result from it — two honest, load-bearing gaps:
 
-1. **It needs real per-minute aggressor buy/sell volume** (`tick_volume_1m`
-   in `db.js`) — there is currently no producer for that table, so this will
-   return `{ success:false, error: "No per-minute buy/sell volume cached..." }`
-   for any range that hasn't been populated. Building that producer (a
-   Databento trades-schema fetcher with aggressor-side classification) is
-   itself a legitimate proposal if a thesis needs it — but verify the
-   classification is correct before trusting anything backtested on top of
-   it; a subtly wrong aggressor side would silently corrupt every delta/
-   absorption signal downstream.
+1. **It needs real per-minute aggressor buy/sell volume**, captured live by
+   `gex-breakout/src/tickVolumeReporter.js` (posted to `POST
+   /api/order-flow/tick-volume`, stored durably in Mongo — see
+   `backend/src/data/tickVolumeMongo.js`) from the live bot's own real-time
+   TopstepX trade stream. This is deliberately NOT backfilled from a
+   third-party vendor: TopstepX's own historical REST API has no buy/sell
+   split at all (only its live feed does), so there is no way to get this
+   data for a date before the reporter started running. This backtest will
+   return `{ success:false, error: "No per-minute buy/sell volume
+   captured..." }` for any range that predates (or has gaps in) that live
+   capture — that is expected, not a bug, and will only improve as more days
+   accumulate. Don't try to "fix" this by substituting a different data
+   source's aggressor classification without the same scrutiny this file's
+   header comment already gives it.
 2. **No footprint-zone data exists**, so `footprintZones` is always `[]`:
    trend-day trades in this backtest run to their stop or a far placeholder
    target instead of trailing behind a footprint zone (the live behavior),

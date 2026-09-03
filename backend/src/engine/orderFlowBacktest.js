@@ -19,16 +19,20 @@ import { buildSessionProfile, findPOC, computeValueArea } from '../../../gex-bre
 // This replays the Order Flow Bot's real per-bar decision logic
 // (evaluateOrderFlowBot/evaluateOrderFlowExit, imported straight from
 // gex-breakout/src/, not reimplemented) against historical 1-minute bars
-// carrying per-bar aggressor buy/sell volume — exactly the tick_volume_1m
-// schema already in db.js. Every trigger that only needs per-bar buy/sell
-// volume (failed_auction, absorption against the session value area,
-// path-of-least-resistance, lack-of-participation) is fully, faithfully
-// backtestable this way.
+// carrying per-bar aggressor buy/sell volume — captured live by
+// gex-breakout/src/tickVolumeReporter.js from the bot's own real-time
+// TopstepX trade stream and stored durably by backend/src/data/tickVolumeMongo.js
+// (see marketData.js's loadOrderFlowBars, the only caller that fetches this
+// data — TopstepX has no historical API for it, only a live feed, so there
+// is no way to backfill dates before that reporter started running). Every
+// trigger that only needs per-bar buy/sell volume (failed_auction,
+// absorption against the session value area, path-of-least-resistance,
+// lack-of-participation) is fully, faithfully backtestable this way.
 //
 // What is NOT faithfully backtestable yet: footprintZones (stacked buy/sell
 // imbalance at individual price levels within a bar) needs genuine
-// tick-by-tick, per-price data that tick_volume_1m's per-bar buy/sell split
-// doesn't carry — footprintZones is always passed as [] here. Concretely
+// tick-by-tick, per-price data that this per-bar buy/sell split doesn't
+// carry — footprintZones is always passed as [] here. Concretely
 // this means: (1) on TREND days, the live bot's trend-continuation trailing
 // stop (TIGHTEN_TO_PRICE, trailing behind the nearest footprint zone) can
 // never fire in this backtest — trend-day trades here run to their stop or

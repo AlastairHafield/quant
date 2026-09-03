@@ -139,20 +139,6 @@ function initSchema() {
       PRIMARY KEY (symbol, utc_datetime)
     );
 
-    -- Per-minute aggressor-side buy/sell volume, reconstructed from Databento
-    -- tick trades (expensive — ~90x the cost of 1-min OHLCV for the same span).
-    -- Cached per day so a long multi-day pull is resumable after any
-    -- interruption (timeout, connection drop, sleep) instead of re-paying for
-    -- days already fetched.
-    CREATE TABLE IF NOT EXISTS tick_volume_1m (
-      symbol TEXT,
-      date TEXT,
-      ny_time INTEGER,
-      buy_volume REAL,
-      sell_volume REAL,
-      PRIMARY KEY (symbol, date, ny_time)
-    );
-
     CREATE TABLE IF NOT EXISTS mr_backtest_runs (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
       run_at TEXT DEFAULT (datetime('now')),
@@ -527,28 +513,6 @@ export function getBars1m(symbol, from, to) {
     SELECT * FROM bars_1m
     WHERE symbol = ? AND date >= ? AND date <= ?
     ORDER BY utc_datetime ASC
-  `).all(symbol, from, to);
-}
-
-// Tick-derived per-minute buy/sell volume cache — see tick_volume_1m above.
-export function upsertTickVolume1m(symbol, date, rows) {
-  const db = getDb();
-  const insert = db.prepare(`
-    INSERT OR REPLACE INTO tick_volume_1m (symbol, date, ny_time, buy_volume, sell_volume)
-    VALUES (@symbol, @date, @ny_time, @buy_volume, @sell_volume)
-  `);
-  db.transaction((rs) => rs.forEach(r => insert.run({ symbol, date, ny_time: r.ny_time, buy_volume: r.buy_volume, sell_volume: r.sell_volume })))(rows);
-}
-
-export function getTickVolumeDays(symbol, from, to) {
-  return getDb().prepare(`
-    SELECT DISTINCT date FROM tick_volume_1m WHERE symbol = ? AND date >= ? AND date <= ?
-  `).all(symbol, from, to).map(r => r.date);
-}
-
-export function getTickVolume1m(symbol, from, to) {
-  return getDb().prepare(`
-    SELECT * FROM tick_volume_1m WHERE symbol = ? AND date >= ? AND date <= ? ORDER BY date ASC, ny_time ASC
   `).all(symbol, from, to);
 }
 

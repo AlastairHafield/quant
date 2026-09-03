@@ -7,6 +7,7 @@ import { runMRBacktest, runMRSweep } from '../engine/mrBacktest.js';
 import { runORBBacktest, runORBSweep, runORBWalkForward } from '../engine/orbBacktest.js';
 import { runGapFillBacktest, runGapFillSweep, runGapFillWalkForward } from '../engine/gapFillBacktest.js';
 import { runOrderFlowBacktest } from '../engine/orderFlowBacktest.js';
+import { upsertTickVolume1m } from '../data/tickVolumeMongo.js';
 import { parsePineScriptParams } from '../engine/parsePineScript.js';
 import { getBacktestRuns, getBacktestTrades, getEarningsEvents, removeStock, getSDRuns, getSDTrades, getMRRuns, getMRRun, getMRTrades, getMRSweep, getORBRuns, getORBRun, getORBTrades, getORBSweep, getGapFillRuns, getGapFillRun, getGapFillTrades, getGapFillSweep } from '../data/db.js';
 import { setGexBreakoutStatus, getGexBreakoutStatus } from '../data/gexBreakoutStatus.js';
@@ -459,6 +460,29 @@ router.post('/orderflow/backtest/run', async (req, res) => {
     res.json({ success: true, data: result });
   } catch (e) {
     console.error('Order Flow backtest failed:', e);
+    res.status(500).json({ success: false, error: e.message });
+  }
+});
+
+// Durable capture of the live Order Flow Bot's own per-minute aggressor
+// buy/sell volume — see gex-breakout/src/tickVolumeReporter.js (the sender)
+// and tickVolumeMongo.js (why this is Mongo, not the SQLite bar cache).
+// Reuses the same shared-secret relay pattern as the status-relay routes
+// above, and the same secret (GEX_STATUS_SECRET) — this is the same trusted
+// worker process, not a new integration needing its own secret to manage.
+router.post('/order-flow/tick-volume', async (req, res) => {
+  const expected = process.env.GEX_STATUS_SECRET;
+  if (expected && req.headers['x-status-secret'] !== expected) {
+    return res.status(401).json({ success: false, error: 'invalid status secret' });
+  }
+  const { symbol, rows } = req.body;
+  if (!symbol || !Array.isArray(rows) || !rows.length) {
+    return res.status(400).json({ success: false, error: 'symbol and a non-empty rows array are required' });
+  }
+  try {
+    await upsertTickVolume1m(symbol, rows);
+    res.json({ success: true, count: rows.length });
+  } catch (e) {
     res.status(500).json({ success: false, error: e.message });
   }
 });

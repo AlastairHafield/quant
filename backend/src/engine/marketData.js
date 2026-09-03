@@ -151,23 +151,26 @@ export function buildRegimeMap(dailyBars, vixBars) {
   return regime;
 }
 
-// 1-minute bars carrying real per-minute aggressor buy/sell volume (tick_volume_1m,
-// joined onto the OHLCV bars_1m/Databento cache by date+ny_time), plus the same
-// prior-day ADX regime map every other engine uses. Deliberately refuses to run on
-// plain OHLCV with no real tick-derived volume — orderFlowBacktest.js's entire
-// premise is aggressor buy/sell volume (delta, absorption, path-of-least-resistance),
-// so silently backtesting against fabricated/zero volume would produce a result that
-// looks real but means nothing. There is currently no producer for tick_volume_1m
-// (see db.js) — this will return `error` until one exists and has been run for the
-// requested range.
+// 1-minute bars carrying real per-minute aggressor buy/sell volume (from
+// tickVolumeMongo.js — see that file for why this is Mongo, not the SQLite
+// bar cache below), joined onto the OHLCV bars_1m/Databento cache by
+// date+ny_time, plus the same prior-day ADX regime map every other engine
+// uses. Deliberately refuses to run on plain OHLCV with no real tick-derived
+// volume — orderFlowBacktest.js's entire premise is aggressor buy/sell volume
+// (delta, absorption, path-of-least-resistance), so silently backtesting
+// against fabricated/zero volume would produce a result that looks real but
+// means nothing. The only producer of this data is
+// gex-breakout/src/tickVolumeReporter.js, capturing the live Order Flow
+// Bot's own real-time feed going forward — this will return `error` until
+// that's been running long enough to cover the requested range.
 export async function loadOrderFlowBars(symbol, dateFrom, dateTo, params = {}) {
-  const { getTickVolume1m } = await import('../data/db.js');
+  const { getTickVolume1m } = await import('../data/tickVolumeMongo.js');
   const fetchFrom = format(addDays(parseISO(dateFrom), -7), 'yyyy-MM-dd');
   const warmupFrom = format(addDays(parseISO(dateFrom), -300), 'yyyy-MM-dd');
 
   const [ohlcvBars, tickVolRows, daily, vix] = await Promise.all([
     loadIntradayBars(symbol, fetchFrom, dateTo, params.apiKey, params.timeframe || '1m-databento'),
-    Promise.resolve(getTickVolume1m(symbol, dateFrom, dateTo)),
+    getTickVolume1m(symbol, dateFrom, dateTo),
     loadDaily(symbol, warmupFrom, dateTo),
     loadDaily('^VIX', warmupFrom, dateTo),
   ]);
@@ -175,7 +178,7 @@ export async function loadOrderFlowBars(symbol, dateFrom, dateTo, params = {}) {
   if (tickVolRows.length === 0) {
     return {
       bars: [], regimeMap: {},
-      error: `No per-minute buy/sell volume cached for ${symbol} ${dateFrom}..${dateTo} (tick_volume_1m has no rows in this range). The Order Flow backtest refuses to substitute plain OHLCV volume, since its entire premise is aggressor buy/sell volume — a Databento-trades-schema producer needs to populate tick_volume_1m for this range first.`,
+      error: `No per-minute buy/sell volume captured for ${symbol} ${dateFrom}..${dateTo}. The Order Flow backtest refuses to substitute plain OHLCV volume, since its entire premise is aggressor buy/sell volume — gex-breakout's live tickVolumeReporter needs to have been running and capturing this symbol for this range first.`,
     };
   }
 
