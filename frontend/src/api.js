@@ -39,3 +39,5 @@ export const getORBSweep = (sweepId) => api.get(`/orb/sweeps/${sweepId}`).then(r
 export const getTradeJournalTrades = (params) => api.get('/trade-journal/trades', { params }).then(r => r.data);
 export const getTradeJournalExitActions = (params) => api.get('/trade-journal/exit-actions', { params }).then(r => r.data);
 export const getTradeJournalDailySummaries = () => api.get('/trade-journal/daily-summaries').then(r => r.data);
+
+export const getAgentHarnessAuditLog = (params) => api.get('/agent-harness/audit-log', { params }).then(r => r.data);

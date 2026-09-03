@@ -5,6 +5,7 @@ import GapContinuationDashboard from './GapContinuationDashboard';
 import TradeJournal from './TradeJournal';
 import PracticeMode from './PracticeMode';
 import StrategyConfig from './StrategyConfig';
+import AgentHarnessDashboard from './AgentHarnessDashboard';
 
 // The three real, live-money strategies come first, each with its own tab —
 // whatever trades a practice account (currently just GEX Breakout's Strategy
@@ -16,6 +17,7 @@ const STRATS = [
   { id: 'practice', label: 'Practice Mode', icon: '🧪', Component: PracticeMode },
   { id: 'config', label: 'Strategy Config', icon: '⚙', Component: StrategyConfig },
   { id: 'journal', label: 'Trade Journal', icon: '📓', Component: TradeJournal },
+  { id: 'harness', label: 'Agent Harness', icon: '🤖', Component: AgentHarnessDashboard },
 ];
 
 export default function LiveDashboard() {
