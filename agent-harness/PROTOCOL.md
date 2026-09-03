@@ -58,6 +58,15 @@ reconstruct which critique responds to which proposal once more than one is
 in flight for the same strategy; `GET /agent-harness/audit-log?debateId=...`
 is how you (or the human) pull one full exchange.
 
+**You have zero memory of the run that made the original proposal.** When
+continuing an existing debate on a later day (grading a still-open critique,
+or checking on a proposal that's been shadow-trading — daily-loop step 8),
+you don't already know its `debateId`. Find it first: `GET
+/agent-harness/audit-log?strategy=<strategy>&type=proposal` and read
+`debateId` off the relevant entry. Never guess one or mint a new one for an
+existing proposal — that's indistinguishable from starting a second,
+unrelated debate for the same strategy.
+
 ## Non-negotiable safety rules
 
 1. **Never edit, weaken, or route around** `shared/killSwitch.js`,
@@ -228,7 +237,10 @@ For each of the three strategies, the **proposer** agent:
    `agent-proposal/<strategy>-<date>` branch. Call
    `/api/promotion-gate/evaluate` (a brand-new proposal will almost always
    fail on `shadowDays` — that's correct, not a bug). Log a final `type:
-   "proposal"` entry with the branch name and what a human needs to do next
+   "proposal"` entry — **with the SAME `debateId` as your original proposal
+   entry, passed explicitly** (omitting it here would mint a brand-new
+   `debateId` for what is actually a follow-up, silently splitting one debate
+   into two) — with the branch name and what a human needs to do next
    (review it; if they like it, deploy it themselves in **practice mode**,
    `ACCOUNT_MODE=practice`, to start accumulating shadow days — you cannot
    deploy anything yourself).
