@@ -74,3 +74,54 @@ export function computeLiveVsBacktestDrift(liveStats, backtestStats, tolerances 
     ].filter(Boolean),
   };
 }
+
+// ─── Shadow-day reports for the promotion gate ───────────────────────────
+//
+// promotionGate.js needs one { dayKey, drift } per consecutive practice-
+// account trading day. The naive reading — compare THAT day's own trades
+// against the backtest — silently defeats the whole check for a low-
+// frequency strategy: gap-continuation and mechanical-orb each trade only a
+// handful of times a MONTH, so a single day almost never reaches
+// computeLiveVsBacktestDrift's default minLiveTrades:5, and an
+// always-"not comparable" day never counts as drift. The gate would then
+// approve promotion having never actually been able to check for drift —
+// not because the strategy passed, but because it was never really tested.
+//
+// Fixed here by making each day's comparison CUMULATIVE: day N's drift
+// compares every shadow trade from day 1 through day N (inclusive) against
+// the backtest, not day N alone. This is also a better match for what
+// "N consecutive clean shadow days" is actually meant to establish — that
+// live behavior hasn't drifted over the course of the shadow period, not
+// that any single arbitrary day was individually representative.
+//
+// dailyTradeGroups: chronologically-sorted array of { dayKey, trades }
+// (trades = that day's own CLOSED live trade docs only) — build with
+// groupTradesByDay below.
+export function buildShadowDayReports(dailyTradeGroups, backtestStats, tolerances = {}) {
+  const cumulative = [];
+  const reports = [];
+  for (const { dayKey, trades } of dailyTradeGroups) {
+    cumulative.push(...trades);
+    const liveStats = summarizeLiveTrades(cumulative);
+    reports.push({ dayKey, cumulativeLiveTrades: liveStats.totalTrades, drift: computeLiveVsBacktestDrift(liveStats, backtestStats, tolerances) });
+  }
+  return reports;
+}
+
+// Buckets a flat trade list (tradeJournalMongo.js's fetchLedgerTrades — any
+// shape carrying closedAt/status/realizedPnl) into chronologically-sorted
+// per-day groups of CLOSED trades, keyed by the calendar-date portion of
+// closedAt (an ISO string) — NOT the trades' own dayKey field, which is a
+// Date.prototype.toDateString() string ("Www Mon DD YYYY") that does not
+// sort chronologically (see tradeJournalMongo.js's fetchDailySummaries
+// comment for the same trap caught there before).
+export function groupTradesByDay(trades) {
+  const closed = trades.filter((t) => t.status === 'closed' && typeof t.realizedPnl === 'number' && t.closedAt);
+  const byDate = new Map();
+  for (const t of closed) {
+    const date = t.closedAt.slice(0, 10);
+    if (!byDate.has(date)) byDate.set(date, []);
+    byDate.get(date).push(t);
+  }
+  return [...byDate.entries()].sort(([a], [b]) => a.localeCompare(b)).map(([dayKey, dayTrades]) => ({ dayKey, trades: dayTrades }));
+}

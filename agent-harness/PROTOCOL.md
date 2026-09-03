@@ -135,6 +135,7 @@ All endpoints return `{ success: bool, data?: ..., error?: string }`.
 | Gap-fill backtest / sweep / walk-forward | `POST /api/gapfill/backtest/run`, `/api/gapfill/sweep/run`, `/api/gapfill/walkforward/run` |
 | Order Flow Bot backtest (data-gated — see below) | `POST /api/orderflow/backtest/run` |
 | Live-vs-backtest drift for one strategy | `POST /api/reconciliation/run` — body: `{ system, closedFrom, closedTo, backtestStats, tolerances? }` (system is the Mongo db name: `gex_breakout` \| `mechanical_orb` \| `gap_continuation`; backtestStats is a backtest run's `metrics.full` or `.oos`) |
+| Build promotion-gate-ready `shadowDays` (cumulative per day) | `POST /api/reconciliation/shadow-days` — body: `{ system, dateFrom, dateTo, backtestStats, tolerances? }` |
 | Evaluate the promotion gate | `POST /api/promotion-gate/evaluate` — body: `{ walkForward, regime, deflated, shadowDays, criteria? }` |
 | Get the (unexecuted) promotion command | `POST /api/promotion-gate/action` — body: `{ strategy, gateResult }` |
 | Write an audit entry (auto-posts to Discord) | `POST /api/agent-harness/audit-log` — body: `{ type: "watch"\|"proposal"\|"grade"\|"promotion"\|"demotion"\|"error", role: "proposer"\|"critic-opus"\|..., strategy, summary, details? }` |
@@ -224,12 +225,23 @@ For each of the three strategies, the **proposer** agent:
 7. **If any critic rejects:** do not push anything. Log the rejection with
    full reasoning so the next run doesn't repeat the same mistake.
 
-8. **For an existing proposal that's been shadow-trading:** assemble its
-   `shadowDays` (one `{ dayKey, drift }` per trading day since it started,
-   via `/api/reconciliation/run`) and re-evaluate the promotion gate. If
-   `approved: true`, get the command from `/api/promotion-gate/action` and
-   log a `type: "promotion"` entry containing it, clearly flagged for a
-   human to run. Never run it yourself.
+8. **For an existing proposal that's been shadow-trading:** get its
+   `shadowDays` in one call — `POST /api/reconciliation/shadow-days` (body:
+   `{ system, dateFrom, dateTo, backtestStats, tolerances? }`, same
+   `backtestStats` shape as `/reconciliation/run`) — then re-evaluate the
+   promotion gate with the `shadowDays` it returns. If `approved: true`, get
+   the command from `/api/promotion-gate/action` and log a `type:
+   "promotion"` entry containing it, clearly flagged for a human to run.
+   Never run it yourself.
+   **Why this isn't just N calls to `/reconciliation/run`:** these
+   strategies trade a handful of times a month — comparing any ONE day's own
+   trades against the backtest would almost never hit the 5-trade minimum to
+   even be "comparable," silently defeating the drift check for every
+   low-frequency strategy. `/reconciliation/shadow-days` instead makes each
+   day's comparison CUMULATIVE (day N vs. everything from day 1 through N),
+   so drift becomes detectable as the shadow period accumulates trades. See
+   `backend/src/engine/reconciliation.js`'s `buildShadowDayReports` if this
+   needs adjusting for a new strategy's trade frequency.
 
 ## End of run
 

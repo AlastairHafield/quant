@@ -14,7 +14,7 @@ import { setGexBreakoutStatus, getGexBreakoutStatus } from '../data/gexBreakoutS
 import { setMechanicalOrbStatus, getMechanicalOrbStatus } from '../data/mechanicalOrbStatus.js';
 import { setGapContinuationStatus, getGapContinuationStatus } from '../data/gapContinuationStatus.js';
 import { fetchTrades, fetchExitActions, fetchDailySummaries, fetchLedgerTrades, fetchDailyLedger } from '../data/tradeJournalMongo.js';
-import { summarizeLiveTrades, computeLiveVsBacktestDrift } from '../engine/reconciliation.js';
+import { summarizeLiveTrades, computeLiveVsBacktestDrift, groupTradesByDay, buildShadowDayReports } from '../engine/reconciliation.js';
 import { evaluatePromotionGate } from '../engine/promotionGate.js';
 import { describePromotionAction } from '../engine/promotionAction.js';
 import { logAuditEntry, fetchAuditLog } from '../data/agentAuditLog.js';
@@ -631,6 +631,27 @@ router.post('/reconciliation/run', async (req, res) => {
     const liveStats = summarizeLiveTrades(liveTrades);
     const drift = computeLiveVsBacktestDrift(liveStats, backtestStats, tolerances || {});
     res.json({ success: true, data: { system, closedFrom, closedTo, liveStats, backtestStats, ...drift } });
+  } catch (e) {
+    res.status(500).json({ success: false, error: e.message });
+  }
+});
+
+// Builds promotionGate.js's `shadowDays` array in one call instead of the
+// agent assembling it via N separate /reconciliation/run calls (one per
+// practice day) — see reconciliation.js's buildShadowDayReports for why each
+// day's comparison is cumulative (day 1..N), not day-N-alone: these
+// strategies trade too infrequently for any single day to be individually
+// comparable.
+router.post('/reconciliation/shadow-days', async (req, res) => {
+  const { system, dateFrom, dateTo, backtestStats, tolerances } = req.body;
+  if (!system || !dateFrom || !dateTo || !backtestStats) {
+    return res.status(400).json({ success: false, error: 'system, dateFrom, dateTo, and backtestStats are required' });
+  }
+  try {
+    const trades = await fetchLedgerTrades({ system, closedFrom: dateFrom, closedTo: dateTo, limit: 2000 });
+    const dailyGroups = groupTradesByDay(trades);
+    const shadowDays = buildShadowDayReports(dailyGroups, backtestStats, tolerances || {});
+    res.json({ success: true, data: { system, dateFrom, dateTo, shadowDays } });
   } catch (e) {
     res.status(500).json({ success: false, error: e.message });
   }
