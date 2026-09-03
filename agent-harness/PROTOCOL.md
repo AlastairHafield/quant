@@ -48,6 +48,16 @@ the human watching the channel sees the actual thesis → critique → verdict
 sequence as it happens, in each agent's own voice. Write these for a human
 reader: state your reasoning, not just a verdict.
 
+**Thread every response back to its proposal with `debateId`.** The
+proposer's `type: "proposal"` entry gets a fresh `debateId` generated for it
+automatically (in the response from `POST /agent-harness/audit-log` — read
+it off `data.debateId`) if you don't supply one. Every critic's `type:
+"grade"` entry — and any later `promotion`/`demotion` entry for that same
+proposal — MUST include that exact `debateId`. Without it there is no way to
+reconstruct which critique responds to which proposal once more than one is
+in flight for the same strategy; `GET /agent-harness/audit-log?debateId=...`
+is how you (or the human) pull one full exchange.
+
 ## Non-negotiable safety rules
 
 1. **Never edit, weaken, or route around** `shared/killSwitch.js`,
@@ -138,8 +148,8 @@ All endpoints return `{ success: bool, data?: ..., error?: string }`.
 | Build promotion-gate-ready `shadowDays` (cumulative per day) | `POST /api/reconciliation/shadow-days` — body: `{ system, dateFrom, dateTo, backtestStats, tolerances? }` |
 | Evaluate the promotion gate | `POST /api/promotion-gate/evaluate` — body: `{ walkForward, regime, deflated, shadowDays, criteria? }` |
 | Get the (unexecuted) promotion command | `POST /api/promotion-gate/action` — body: `{ strategy, gateResult }` |
-| Write an audit entry (auto-posts to Discord) | `POST /api/agent-harness/audit-log` — body: `{ type: "watch"\|"proposal"\|"grade"\|"promotion"\|"demotion"\|"error", role: "proposer"\|"critic-opus"\|..., strategy, summary, details? }` |
-| Read recent audit entries | `GET /api/agent-harness/audit-log?strategy=&type=&limit=` |
+| Write an audit entry (auto-posts to Discord) | `POST /api/agent-harness/audit-log` — body: `{ type: "watch"\|"proposal"\|"grade"\|"promotion"\|"demotion"\|"error", role: "proposer"\|"critic-opus"\|..., strategy, summary, details?, debateId? }` — omit `debateId` on a `proposal` entry to get one generated; required on every entry responding to that proposal (see "Thread every response" above) |
+| Read recent audit entries | `GET /api/agent-harness/audit-log?strategy=&type=&debateId=&limit=` |
 
 `system` (Mongo db name) vs the strategy directory name: `gap-continuation`
 ↔ `gap_continuation`, `mechanical-orb` ↔ `mechanical_orb`, `gex-breakout`
@@ -209,9 +219,10 @@ For each of the three strategies, the **proposer** agent:
    your own honest `numTrialsN`.
 
 5. **Hand off to the critic(s).** Spawn the critic agent(s) with the thesis,
-   diff, and evidence — they should not see your own confidence level or
-   framing beyond the raw facts. Each critic posts their own `type:
-   "grade"` entry with `approve`/`reject` and reasoning.
+   diff, evidence, and the `debateId` from your own proposal entry — they
+   should not see your own confidence level or framing beyond the raw facts.
+   Each critic posts their own `type: "grade"` entry (same `debateId`) with
+   `approve`/`reject` and reasoning.
 
 6. **If every critic approves:** commit and push the
    `agent-proposal/<strategy>-<date>` branch. Call

@@ -1,4 +1,5 @@
 import { MongoClient } from 'mongodb';
+import { randomUUID } from 'crypto';
 
 // Durable record of every decision the Phase 5 agent harness makes — a
 // strategy it kept watching, a proposal it drafted, a grade one agent role
@@ -57,6 +58,7 @@ async function notifyDiscord(entry) {
   if (!webhookUrl) return; // no webhook configured anywhere — silently skip, same as every bot's own postDiscordEmbed
   const fields = [{ name: 'Strategy', value: String(entry.strategy ?? '—'), inline: true }];
   if (entry.role) fields.push({ name: 'Agent role', value: String(entry.role), inline: true });
+  if (entry.debateId) fields.push({ name: 'Debate', value: String(entry.debateId).slice(0, 8), inline: true });
   if (entry.details) {
     const detailsStr = typeof entry.details === 'string' ? entry.details : JSON.stringify(entry.details, null, 1);
     fields.push({ name: 'Details', value: '```' + truncate(detailsStr, 1000) + '```' });
@@ -91,9 +93,27 @@ async function notifyDiscord(entry) {
 // "proposer" / "critic-opus" / "critic-sonnet") — surfaced in Discord so a
 // multi-model debate reads as a sequence of distinct voices, not one
 // undifferentiated stream.
+
+// A proposal and the critiques it gets used to have nothing linking them but
+// `strategy` + rough time proximity — impossible to reliably reconstruct
+// "the full exchange for THIS proposal" once more than one is ever in
+// flight for the same strategy, which defeats the user's actual ask
+// ("monitor their communications" as a debate, not an undifferentiated
+// stream). Pure so it's testable without touching Mongo: a `proposal` entry
+// originates a new debateId if it doesn't already carry one; every other
+// entry is expected to pass the debateId of the proposal it's responding to
+// and is left alone if it does (or doesn't — not hard-enforced, same
+// soft-convention as `type` above).
+export function resolveDebateId(entry) {
+  if (entry.debateId) return entry.debateId;
+  if (entry.type === 'proposal') return randomUUID();
+  return undefined;
+}
+
 export async function logAuditEntry(entry) {
   const db = await getDb();
-  const doc = { ...entry, loggedAt: new Date().toISOString() };
+  const debateId = resolveDebateId(entry);
+  const doc = { ...entry, ...(debateId ? { debateId } : {}), loggedAt: new Date().toISOString() };
   await db.collection('auditLog').insertOne(doc);
   // Best-effort, never blocks the durable write above — a Discord hiccup
   // must never look like the audit log itself failed.
@@ -101,10 +121,11 @@ export async function logAuditEntry(entry) {
   return doc;
 }
 
-export async function fetchAuditLog({ strategy, type, limit = 100 } = {}) {
+export async function fetchAuditLog({ strategy, type, debateId, limit = 100 } = {}) {
   const db = await getDb();
   const query = {};
   if (strategy) query.strategy = strategy;
   if (type) query.type = type;
+  if (debateId) query.debateId = debateId;
   return db.collection('auditLog').find(query).sort({ loggedAt: -1 }).limit(limit).toArray();
 }

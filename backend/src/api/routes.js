@@ -661,9 +661,8 @@ router.post('/reconciliation/shadow-days', async (req, res) => {
 // Pure decision, no side effects — does NOT flip anything live itself. Feed
 // it walkForward (POST .../walkforward/run's data), regime
 // (metrics.regimeRobustness from a backtest run), deflated
-// (a sweep's deflatedSharpeOfTop), and shadowDays (an array of
-// { dayKey, drift } built from repeated /reconciliation/run calls, one per
-// consecutive practice-account trading day).
+// (a sweep's deflatedSharpeOfTop), and shadowDays (the array
+// POST /reconciliation/shadow-days returns).
 router.post('/promotion-gate/evaluate', (req, res) => {
   const { walkForward, regime, deflated, shadowDays, criteria } = req.body;
   try {
@@ -708,6 +707,7 @@ router.get('/agent-harness/audit-log', async (req, res) => {
     const entries = await fetchAuditLog({
       strategy: req.query.strategy || undefined,
       type: req.query.type || undefined,
+      debateId: req.query.debateId || undefined,
       limit: req.query.limit ? parseInt(req.query.limit) : undefined,
     });
     res.json({ success: true, data: entries });
