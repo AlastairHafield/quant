@@ -153,7 +153,11 @@ export function orderFlowBacktestCore(allBars, regimeMap, rawParams) {
   const engineConfig = toEngineConfig(params);
 
   const sessionBars = allBars.filter((b) => b.ny_time >= params.sessionStartET && b.ny_time < params.sessionEndET);
-  if (sessionBars.some((b) => b.buyVolume == null && b.sellVolume == null)) {
+  // OR, not AND: a bar missing EITHER side (a partial write/gap) must still
+  // be caught here — letting it through only for the two-lines-down `?? 0`
+  // fallback to zero-fill the missing side would fabricate exactly the
+  // "no one traded" signal this file's header comment says must never happen.
+  if (sessionBars.some((b) => b.buyVolume == null || b.sellVolume == null)) {
     return { error: 'Bars are missing buyVolume/sellVolume — this engine needs per-minute aggressor volume (tick_volume_1m), not plain OHLCV.' };
   }
   // withCumDelta is a single forward pass — bar i's cumDelta only ever

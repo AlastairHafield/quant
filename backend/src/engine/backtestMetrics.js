@@ -74,7 +74,8 @@ export function metricSet(trades, accountSize = DEFAULT_ACCOUNT) {
   if (trades.length === 0) {
     return { totalTrades: 0, wins: 0, losses: 0, winRate: 0, avgTradeReturnPct: 0, totalReturnPct: 0,
              totalPnlDollars: 0, sharpe: 0, profitFactor: 0, expectancy: 0, avgWinPct: 0, avgLossPct: 0,
-             maxDrawdownPct: 0, targetHits: 0, stopHits: 0, timeExits: 0, eodExits: 0 };
+             maxDrawdownPct: 0, targetHits: 0, stopHits: 0, timeExits: 0, eodExits: 0,
+             exitNowHits: 0, partialHits: 0 };
   }
   const returns = trades.map(t => t.return_pct);
   const wins = returns.filter(r => r > 0);
@@ -111,6 +112,14 @@ export function metricSet(trades, accountSize = DEFAULT_ACCOUNT) {
     stopHits: trades.filter(t => t.exit_result === 'STOP').length,
     timeExits: trades.filter(t => t.exit_result === 'TIME').length,
     eodExits: trades.filter(t => t.exit_result === 'EOD').length,
+    // orderFlowBacktest.js-specific exit outcomes (EXIT_NOW: early
+    // delta-divergence bailout, PARTIAL_TREATED_AS_FULL: absorption-at-target
+    // treated as a full exit — see that file's header comment) — 0 for every
+    // other engine, which never produces these exit_result values. Without
+    // these two, targetHits+stopHits+timeExits+eodExits could sum to less
+    // than totalTrades for an order-flow run with no obvious explanation why.
+    exitNowHits: trades.filter(t => t.exit_result === 'EXIT_NOW').length,
+    partialHits: trades.filter(t => t.exit_result === 'PARTIAL_TREATED_AS_FULL').length,
   };
 }
 

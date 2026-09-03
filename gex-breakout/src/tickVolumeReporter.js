@@ -52,7 +52,17 @@ export function bufferTickVolumeBar(buffer, t, { buyVolume, sellVolume }) {
 // Snapshots exactly what's buffered right now before the network call, so a
 // bar appended mid-flight (onBar can fire again while this await is
 // pending) is neither lost nor double-counted — it's simply left in the
-// buffer for the next flush.
+// buffer for the next flush. This DOES rely on the request actually
+// finishing promptly: the success path below removes the first `sentCount`
+// rows unconditionally, and bufferTickVolumeBar's own MAX_BUFFERED trim also
+// splices from the front — if a request were somehow left hanging for as
+// long as it'd take to buffer past MAX_BUFFERED (~33hrs at one bar/minute),
+// those two front-splices could remove the wrong rows. The FETCH_TIMEOUT_MS
+// bound below exists specifically to make that precondition impossible, not
+// to handle a slow-but-eventually-successful backend gracefully (a timeout
+// here is just a failed flush, retried next interval like any other).
+const FETCH_TIMEOUT_MS = 15_000;
+
 export async function flushTickVolume(buffer, symbol, backendUrl, secret, fetchImpl = fetch) {
   const sentCount = buffer.rows.length;
   if (!sentCount) return;
@@ -64,6 +74,7 @@ export async function flushTickVolume(buffer, symbol, backendUrl, secret, fetchI
       method: 'POST',
       headers,
       body: JSON.stringify({ symbol: appLevelSymbolFor(symbol), rows: rowsToSend }),
+      signal: AbortSignal.timeout(FETCH_TIMEOUT_MS),
     });
     if (!res.ok) {
       console.error(`Tick-volume push failed: ${res.status} ${await res.text()}`);

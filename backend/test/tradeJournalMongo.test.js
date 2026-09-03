@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { aggregateDailyLedger } from '../src/data/tradeJournalMongo.js';
+import { aggregateDailyLedger, widenClosedFrom, widenClosedTo } from '../src/data/tradeJournalMongo.js';
 
 test('aggregateDailyLedger: excludes open trades and trades with no realizedPnl yet', () => {
   const trades = [
@@ -46,4 +46,27 @@ test('aggregateDailyLedger: empty input produces a zeroed, not crashed, ledger',
   const ledger = aggregateDailyLedger('Mon Jan 01 2026', []);
   assert.deepEqual(ledger.byStrategy, {});
   assert.deepEqual(ledger.accountWide, { trades: 0, wins: 0, losses: 0, winRate: 0, totalRealizedPnl: 0 });
+});
+
+// A bare "YYYY-MM-DD" (every date param elsewhere in this app) used to compare
+// WRONG against closedAt's full ISO strings: '$lte' against a bare date
+// excludes every trade on that day with a time component, since
+// "2026-09-02T14:30:00.000Z" sorts AFTER its own date-only prefix
+// "2026-09-02" — silently dropping the entire final day from any range query.
+test('widenClosedFrom/widenClosedTo: a bare date widens to that day\'s full UTC range', () => {
+  assert.equal(widenClosedFrom('2026-09-02'), '2026-09-02T00:00:00.000Z');
+  assert.equal(widenClosedTo('2026-09-02'), '2026-09-02T23:59:59.999Z');
+});
+
+test('widenClosedFrom/widenClosedTo: an already-ISO timestamp is left untouched', () => {
+  assert.equal(widenClosedFrom('2026-09-02T09:15:00.000Z'), '2026-09-02T09:15:00.000Z');
+  assert.equal(widenClosedTo('2026-09-02T09:15:00.000Z'), '2026-09-02T09:15:00.000Z');
+});
+
+test('widenClosedTo: a trade closing later on the bare-date boundary day is now included', () => {
+  // The actual failure this fixes: a trade closing at 14:30 UTC on the final
+  // day of a bare-date range must satisfy closedAt <= widenClosedTo(dateTo).
+  const closedAt = '2026-09-02T14:30:00.000Z';
+  assert.ok(closedAt <= widenClosedTo('2026-09-02'));
+  assert.ok(closedAt > '2026-09-02'); // confirms the ORIGINAL (unwidened) comparison would have wrongly excluded it
 });

@@ -58,6 +58,16 @@ describe('orderFlowBacktestCore', () => {
     assert.match(result.error, /buyVolume\/sellVolume/);
   });
 
+  test('refuses to run when only ONE side of a bar\'s volume is missing (partial write/gap), not just when both are', () => {
+    // A bar with buyVolume present but sellVolume missing must still be
+    // rejected here — letting it through would fall to the `?? 0` fallback
+    // a few lines later and fabricate a zero sell-volume bar, exactly the
+    // "no one traded" fabricated signal this engine must never produce.
+    const bars = [{ date: '2026-06-01', ny_time: 1000, open: 1, high: 1, low: 1, close: 1, buyVolume: 12, sellVolume: null }];
+    const result = orderFlowBacktestCore(bars, {}, { dateFrom: '2026-06-01', dateTo: '2026-06-01' });
+    assert.match(result.error, /buyVolume\/sellVolume/);
+  });
+
   test('fires a path-of-least-resistance long via the real live orderFlowBot logic', () => {
     const date = '2026-06-01';
     const bars = buildTrendDay(date);

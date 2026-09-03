@@ -165,11 +165,17 @@ export function buildRegimeMap(dailyBars, vixBars) {
 // that's been running long enough to cover the requested range.
 export async function loadOrderFlowBars(symbol, dateFrom, dateTo, params = {}) {
   const { getTickVolume1m } = await import('../data/tickVolumeMongo.js');
-  const fetchFrom = format(addDays(parseISO(dateFrom), -7), 'yyyy-MM-dd');
   const warmupFrom = format(addDays(parseISO(dateFrom), -300), 'yyyy-MM-dd');
 
+  // No fetchFrom pre-buffer here, unlike loadAllData below — this engine has
+  // no cross-day warmup indicator (no ATR/VWAP-style rolling calc reaching
+  // back before dateFrom; each day's session profile is built from that
+  // day's own bars only), so a week of pre-dateFrom Databento 1-minute bars
+  // would just be fetched and immediately discarded by the date filter a few
+  // lines down — pure wasted cost on data that's already ~90x the price of
+  // 1-min OHLCV (see databento.js).
   const [ohlcvBars, tickVolRows, daily, vix] = await Promise.all([
-    loadIntradayBars(symbol, fetchFrom, dateTo, params.apiKey, params.timeframe || '1m-databento'),
+    loadIntradayBars(symbol, dateFrom, dateTo, params.apiKey, params.timeframe || '1m-databento'),
     getTickVolume1m(symbol, dateFrom, dateTo),
     loadDaily(symbol, warmupFrom, dateTo),
     loadDaily('^VIX', warmupFrom, dateTo),

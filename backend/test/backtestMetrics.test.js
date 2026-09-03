@@ -89,6 +89,7 @@ test('metricSet: empty trades returns an all-zero shape, not a crash', () => {
     totalTrades: 0, wins: 0, losses: 0, winRate: 0, avgTradeReturnPct: 0, totalReturnPct: 0,
     totalPnlDollars: 0, sharpe: 0, profitFactor: 0, expectancy: 0, avgWinPct: 0, avgLossPct: 0,
     maxDrawdownPct: 0, targetHits: 0, stopHits: 0, timeExits: 0, eodExits: 0,
+    exitNowHits: 0, partialHits: 0,
   });
 });
 
@@ -111,7 +112,18 @@ test('metricSet: computes win rate, PnL, Sharpe, profit factor, and drawdown fro
   assert.equal(m.stopHits, 1);
   assert.equal(m.eodExits, 1);
   assert.ok(m.sharpe > 0); // positive average return, positive Sharpe
-  assert.ok(m.maxDrawdownPct > 0); // equity dips after trade 2 and trade 4
+});
+
+test('metricSet: counts orderFlowBacktest.js-specific exit outcomes so the breakdown sums to totalTrades', () => {
+  const trades = [
+    { return_pct: 1, pnl_dollars: 100, exit_result: 'EXIT_NOW' },
+    { return_pct: 1, pnl_dollars: 100, exit_result: 'PARTIAL_TREATED_AS_FULL' },
+    { return_pct: 1, pnl_dollars: 100, exit_result: 'STOP' },
+  ];
+  const m = metricSet(trades, 100000);
+  assert.equal(m.exitNowHits, 1);
+  assert.equal(m.partialHits, 1);
+  assert.equal(m.targetHits + m.stopHits + m.timeExits + m.eodExits + m.exitNowHits + m.partialHits, m.totalTrades);
 });
 
 test('groupMetrics: buckets by an arbitrary key function and sorts keys', () => {

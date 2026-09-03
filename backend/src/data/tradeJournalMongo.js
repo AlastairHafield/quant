@@ -91,6 +91,17 @@ function round2(n) {
 // "Www Mon DD YYYY" string doesn't sort/range chronologically (see
 // fetchDailySummaries' comment above), so a range query has to go through
 // closedAt instead.
+// A bare "YYYY-MM-DD" (every other date param in this app is exactly this
+// shape) compares WRONG against closedAt's full ISO timestamps: string '$lte'
+// against a bare date excludes every trade on that day with a time component,
+// since e.g. "2026-09-02T14:30:00.000Z" sorts AFTER its own date-only prefix
+// "2026-09-02" — a bare closedTo silently drops the entire final day. Widen a
+// bare date to that day's full UTC range; a caller that already passed a full
+// ISO timestamp (this function's original, narrower contract) is untouched.
+const BARE_DATE = /^\d{4}-\d{2}-\d{2}$/;
+export function widenClosedFrom(d) { return BARE_DATE.test(d) ? `${d}T00:00:00.000Z` : d; }
+export function widenClosedTo(d) { return BARE_DATE.test(d) ? `${d}T23:59:59.999Z` : d; }
+
 export async function fetchLedgerTrades({ dayKey, closedFrom, closedTo, system, limit = 500 } = {}) {
   const c = await getClient();
   const dbNames = system ? [system] : STRATEGY_DBS;
@@ -98,8 +109,8 @@ export async function fetchLedgerTrades({ dayKey, closedFrom, closedTo, system, 
   if (dayKey) query.dayKey = dayKey;
   if (closedFrom || closedTo) {
     query.closedAt = {};
-    if (closedFrom) query.closedAt.$gte = closedFrom;
-    if (closedTo) query.closedAt.$lte = closedTo;
+    if (closedFrom) query.closedAt.$gte = widenClosedFrom(closedFrom);
+    if (closedTo) query.closedAt.$lte = widenClosedTo(closedTo);
   }
   const perDb = await Promise.all(dbNames.map(async (dbName) => {
     const docs = await c.db(dbName).collection('trades').find(query).sort({ openedAt: -1 }).limit(limit).toArray();
