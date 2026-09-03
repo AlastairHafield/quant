@@ -20,6 +20,7 @@ import * as tradeJournal from "./tradeJournal.js";
 import { isKillSwitchActive } from "../../shared/killSwitch.js";
 import { computeDailyPnl, isDailyLossCapBreached } from "../../shared/accountRisk.js";
 import { clampToMaxContracts } from "../../shared/protectedLimits.js";
+import { wouldOpenSimultaneousPosition } from "../../shared/hedgeGuard.js";
 
 // Pure half of resolveAccountId below — split out so the practice/live
 // branching is directly testable without a live topstepx.resolveAccountId
@@ -274,17 +275,25 @@ export class Worker {
   }
 
   handleSignal(result) {
-    // Shared with GEX Breakout and Gap Continuation on the same real account/
-    // MES contract, with no coordination between them on position sizing —
-    // stacking a second position on top of an already-open one (this bot's own,
-    // or another bot's) compounds risk beyond what any single strategy was
-    // sized for. this.openPositions is the real broker account state (refreshed
-    // every poll), so this catches a position opened by another bot too, not
-    // just this one's own (which onBar's `if (this.openPosition) return`
-    // already short-circuits before evaluateEntry is even called).
+    // Shared with Gap Continuation on the same real account/MES contract —
+    // and, dormant but still wired to the same account, gex-breakout's
+    // "default" role (accountRoleFor in gex-breakout/src/worker.js; only its
+    // Order Flow Bot is active today, routed to a separate practice account,
+    // but "default" still polls this same real account and would trade it if
+    // ever reactivated) — with no coordination between them on position
+    // sizing. Stacking a second position on top of an already-open one (this
+    // bot's own, or another bot's) compounds risk beyond what any single
+    // strategy was sized for. This is also this account's "absolutely no
+    // hedging" rule in effect —
+    // see shared/hedgeGuard.js, which formalizes it as shared, tested,
+    // safety-critical code precisely so a future change here can't quietly
+    // weaken it. this.openPositions is the real broker account state
+    // (refreshed every poll), so this catches a position opened by another
+    // bot too, not just this one's own (which onBar's `if (this.openPosition)
+    // return` already short-circuits before evaluateEntry is even called).
     const vetoReason = this.haltedForRisk
       ? `risk_halt:${this.haltReason}`
-      : this.openPositions.length > 0
+      : wouldOpenSimultaneousPosition(this.openPositions)
         ? "position_already_open"
         : result.veto;
 
