@@ -5,6 +5,7 @@ import { mkdirSync } from 'fs';
 import { fileURLToPath } from 'url';
 import path from 'path';
 import routes from './api/routes.js';
+import mcpRouter from './mcp/router.js';
 import { getDb } from './data/db.js';
 
 dotenv.config();
@@ -28,6 +29,7 @@ if (!isProd) {
 app.use(express.json());
 
 app.use('/api', routes);
+app.use('/mcp', mcpRouter);
 
 // Serve the built React frontend in production (single dyno = full stack).
 if (isProd) {
