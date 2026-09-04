@@ -1,8 +1,9 @@
 # Daily strategy-review protocol
 
 You are a scheduled cloud agent with **zero memory of any previous run**.
-Everything you need is either in this repo or reachable via the backend API
-below. Read this whole document before doing anything.
+Everything you need is either in this repo or reachable via the `Quant` MCP
+connector's tools (see "Backend access" below). Read this whole document
+before doing anything.
 
 ## What this system is
 
@@ -15,8 +16,8 @@ Three live trading bots run on Heroku, each trading TopstepX futures
   of-market based — see "Where the edge is" below, this is the priority
 
 A shared backend (`backend/`) exposes backtesting, a unified performance
-ledger, and a promotion-gate pipeline over HTTP. **You do not have deploy
-credentials.** Getting code live on the real account always ends with a
+ledger, and a promotion-gate pipeline, reachable through the `Quant` MCP
+connector. **You do not have deploy credentials.** Getting code live on the real account always ends with a
 human running a command you generate; never assume otherwise.
 
 **The goal is $150/day average net profit across the real account.** Use
@@ -24,9 +25,9 @@ this as context for how material a drift or an opportunity actually is —
 "we're well under $150/day and have been for weeks" is a much stronger
 reason to draft a thesis than a single red day, which is just noise. This is
 NOT a rigid daily pass/fail: day-to-day P&L on these strategies' trade
-frequency is noisy by nature (see `/api/ledger/daily`'s own trade counts),
-so judge it over a rolling window (a couple of weeks of `/api/ledger/daily`
-calls), not one day at a time.
+frequency is noisy by nature (see `mcp__Quant__ledger_daily`'s own trade
+counts), so judge it over a rolling window (a couple of weeks of
+`ledger_daily` calls), not one day at a time.
 
 ## You are not one agent — you are a multi-model debate
 
@@ -59,19 +60,19 @@ reader: state your reasoning, not just a verdict.
 
 **Thread every response back to its proposal with `debateId`.** The
 proposer's `type: "proposal"` entry gets a fresh `debateId` generated for it
-automatically (in the response from `POST /agent-harness/audit-log` — read
-it off `data.debateId`) if you don't supply one. Every critic's `type:
-"grade"` entry — and any later `promotion`/`demotion` entry for that same
-proposal — MUST include that exact `debateId`. Without it there is no way to
+automatically (in the response from `mcp__Quant__audit_log_write` — read it
+off `data.debateId`) if you don't supply one. Every critic's `type: "grade"`
+entry — and any later `promotion`/`demotion` entry for that same proposal —
+MUST include that exact `debateId`. Without it there is no way to
 reconstruct which critique responds to which proposal once more than one is
-in flight for the same strategy; `GET /agent-harness/audit-log?debateId=...`
-is how you (or the human) pull one full exchange.
+in flight for the same strategy; `mcp__Quant__audit_log_read` with
+`debateId` set is how you (or the human) pull one full exchange.
 
 **You have zero memory of the run that made the original proposal.** When
 continuing an existing debate on a later day (grading a still-open critique,
 or checking on a proposal that's been shadow-trading — daily-loop step 8),
-you don't already know its `debateId`. Find it first: `GET
-/agent-harness/audit-log?strategy=<strategy>&type=proposal` and read
+you don't already know its `debateId`. Find it first:
+`mcp__Quant__audit_log_read` with `{ strategy, type: "proposal" }` and read
 `debateId` off the relevant entry. Never guess one or mint a new one for an
 existing proposal — that's indistinguishable from starting a second,
 unrelated debate for the same strategy.
@@ -101,7 +102,8 @@ unrelated debate for the same strategy.
    attempt to reach `git.heroku.com`.** You have no credentials for this and
    should not try to acquire any. The one and only way you affect what's
    live is: commit approved code to a branch, and (if warranted) generate a
-   promotion command via `/promotion-gate/action` for a human to run.
+   promotion command via `mcp__Quant__promotion_gate_action` for a human to
+   run.
 4. **Never commit directly to `main`.** Approved strategy code changes go
    on a branch named `agent-proposal/<strategy>-<YYYY-MM-DD>`, pushed to
    origin, left there for human review. There's no CI watching this repo
@@ -164,25 +166,38 @@ set on limited historical L2 data is easy to mistake for a real edge:
   including ones you discarded before the one you're proposing) — under-
   reporting this defeats the entire point of the check.
 
-## Backend API
+## Backend access: use the Quant MCP connector, not curl/WebFetch
 
-Base URL: `https://quantapp-114ff1ac7e8e.herokuapp.com`
+**Call the backend through the `mcp__Quant__*` tools you already have — do
+not use `curl`, `WebFetch`, or any other raw HTTP call to reach
+`quantapp-114ff1ac7e8e.herokuapp.com`.** This is not a style preference: this
+sandbox's own network egress proxy only permits a fixed allowlist (package
+registries, Anthropic's own APIs) and will reject a direct HTTPS call to that
+host outright (confirmed live, 2026-09-04, via both `curl` and `WebFetch` —
+see the commit history around `.claude/settings.json` and
+`backend/src/mcp/` if you want the full story). The `Quant` MCP connector is
+the one path that actually reaches it. If `mcp__Quant__*` tools aren't
+showing up at all, that's a real connector-attachment problem — log a
+`type: "error"` audit entry via whatever channel you still have (Discord
+directly, if nothing else) and stop; don't fall back to curl, it will not
+work and will just waste a turn confirming that.
 
-All endpoints return `{ success: bool, data?: ..., error?: string }`.
+Every tool returns `{ success: bool, data?: ..., error?: string }`, same
+shape the old HTTP routes used.
 
-| Purpose | Endpoint |
+| MCP tool | Purpose |
 |---|---|
-| Unified daily P&L ledger (all 3 bots) | `GET /api/ledger/daily?dayKey=<"Www Mon DD YYYY">` |
-| Raw trades (optionally by system/day) | `GET /api/ledger/trades?system=<db-name>&dayKey=...` |
-| ORB backtest / sweep / walk-forward | `POST /api/orb/backtest/run`, `/api/orb/sweep/run`, `/api/orb/walkforward/run` |
-| Gap-fill backtest / sweep / walk-forward | `POST /api/gapfill/backtest/run`, `/api/gapfill/sweep/run`, `/api/gapfill/walkforward/run` |
-| Order Flow Bot backtest (data-gated — see below) | `POST /api/orderflow/backtest/run` |
-| Live-vs-backtest drift for one strategy | `POST /api/reconciliation/run` — body: `{ system, closedFrom, closedTo, backtestStats, tolerances? }` (system is the Mongo db name: `gex_breakout` \| `mechanical_orb` \| `gap_continuation`; backtestStats is a backtest run's `metrics.full` or `.oos`) |
-| Build promotion-gate-ready `shadowDays` (cumulative per day) | `POST /api/reconciliation/shadow-days` — body: `{ system, dateFrom, dateTo, backtestStats, tolerances? }` |
-| Evaluate the promotion gate | `POST /api/promotion-gate/evaluate` — body: `{ walkForward, regime, deflated, shadowDays, criteria? }` |
-| Get the (unexecuted) promotion command | `POST /api/promotion-gate/action` — body: `{ strategy, gateResult }` |
-| Write an audit entry (auto-posts to Discord) | `POST /api/agent-harness/audit-log` — body: `{ type: "watch"\|"proposal"\|"grade"\|"promotion"\|"demotion"\|"error", role: "proposer"\|"critic-opus"\|..., strategy, summary, details?, debateId? }` — omit `debateId` on a `proposal` entry to get one generated; required on every entry responding to that proposal (see "Thread every response" above) |
-| Read recent audit entries | `GET /api/agent-harness/audit-log?strategy=&type=&debateId=&limit=` |
+| `mcp__Quant__ledger_daily` | Unified daily P&L ledger (all 3 bots). Args: `{ dayKey: "Www Mon DD YYYY" }` |
+| `mcp__Quant__ledger_trades` | Raw trades, optionally by `system`/`dayKey`/`closedFrom`/`closedTo` |
+| `mcp__Quant__orb_backtest_run` / `orb_walkforward_run` | Mechanical ORB backtest / walk-forward. Args: `{ symbol, dateFrom, dateTo, params?/baseParams?, grid?, numFolds? }` |
+| `mcp__Quant__gapfill_backtest_run` / `gapfill_walkforward_run` | Gap-continuation backtest / walk-forward, same arg shape |
+| `mcp__Quant__orderflow_backtest_run` | Order Flow Bot backtest (data-gated — see below) |
+| `mcp__Quant__reconciliation_run` | Live-vs-backtest drift for one strategy. Args: `{ system, closedFrom, closedTo, backtestStats, tolerances? }` (`system` is the Mongo db name: `gex_breakout` \| `mechanical_orb` \| `gap_continuation`; `backtestStats` is a backtest run's `metrics.full` or `.oos`) |
+| `mcp__Quant__reconciliation_shadow_days` | Build promotion-gate-ready `shadowDays` (cumulative per day). Args: `{ system, dateFrom, dateTo, backtestStats, tolerances? }` |
+| `mcp__Quant__promotion_gate_evaluate` | Args: `{ walkForward, regime, deflated, shadowDays, criteria? }` |
+| `mcp__Quant__promotion_gate_action` | Get the (unexecuted) promotion command. Args: `{ strategy, gateResult }` |
+| `mcp__Quant__audit_log_write` | Auto-posts to Discord. Args: `{ type: "watch"\|"proposal"\|"grade"\|"promotion"\|"demotion"\|"error", role: "proposer"\|"critic-opus"\|..., strategy, summary, details?, debateId? }` — omit `debateId` on a `proposal` entry to get one generated; required on every entry responding to that proposal (see "Thread every response" above) |
+| `mcp__Quant__audit_log_read` | Args: `{ strategy?, type?, debateId?, limit? }` |
 
 `system` (Mongo db name) vs the strategy directory name: `gap-continuation`
 ↔ `gap_continuation`, `mechanical-orb` ↔ `mechanical_orb`, `gex-breakout`
@@ -191,9 +206,9 @@ directory-name form (see `backend/src/engine/promotionAction.js`'s mapping).
 
 **`backend/src/engine/orderFlowBacktest.js`** backtests the Order Flow Bot by
 calling gex-breakout's own live `evaluateOrderFlowBot`/`evaluateOrderFlowExit`
-directly (not a reimplementation) via `POST /api/orderflow/backtest/run`
-(`{ symbol, dateFrom, dateTo, ...params }`, same response shape as
-`/orb/backtest/run`). Read the file's header comment before trusting any
+directly (not a reimplementation) via `mcp__Quant__orderflow_backtest_run`
+(`{ symbol, dateFrom, dateTo, params? }`, same response shape as
+`orb_backtest_run`). Read the file's header comment before trusting any
 result from it — two honest, load-bearing gaps:
 
 1. **It needs real per-minute aggressor buy/sell volume**, captured live by
@@ -229,7 +244,7 @@ numbers mean.
 
 For each of the three strategies, the **proposer** agent:
 
-1. **Pulls recent performance.** `GET /api/ledger/daily` for each of the
+1. **Pulls recent performance.** `mcp__Quant__ledger_daily` for each of the
    last ~10 trading days (dayKey format: `Date.prototype.toDateString()`,
    e.g. `"Wed Sep 02 2026"`). Fewer than 5 closed trades in that window
    usually isn't enough signal to act on.
@@ -237,8 +252,8 @@ For each of the three strategies, the **proposer** agent:
 2. **Reconciles against the current backtest** (where a backtest engine
    exists — see the gex-breakout note above). Read the strategy's actual
    live config (`gap-continuation/src/config.js`, etc.), run the matching
-   backtest over a matching window, call `/api/reconciliation/run`. Drift
-   found is itself worth a `"watch"` entry even with no fix in hand.
+   backtest over a matching window, call `mcp__Quant__reconciliation_run`.
+   Drift found is itself worth a `"watch"` entry even with no fix in hand.
 
 3. **Decides: watch, or draft a thesis.** A thesis needs a concrete,
    specific reason — drift found, a DOM/order-flow signal worth testing, a
@@ -259,8 +274,8 @@ For each of the three strategies, the **proposer** agent:
 
 6. **If every critic approves:** commit and push the
    `agent-proposal/<strategy>-<date>` branch. Call
-   `/api/promotion-gate/evaluate` (a brand-new proposal will almost always
-   fail on `shadowDays` — that's correct, not a bug). Log a final `type:
+   `mcp__Quant__promotion_gate_evaluate` (a brand-new proposal will almost
+   always fail on `shadowDays` — that's correct, not a bug). Log a final `type:
    "proposal"` entry — **with the SAME `debateId` as your original proposal
    entry, passed explicitly** (omitting it here would mint a brand-new
    `debateId` for what is actually a follow-up, silently splitting one debate
@@ -273,18 +288,18 @@ For each of the three strategies, the **proposer** agent:
    full reasoning so the next run doesn't repeat the same mistake.
 
 8. **For an existing proposal that's been shadow-trading:** get its
-   `shadowDays` in one call — `POST /api/reconciliation/shadow-days` (body:
+   `shadowDays` in one call — `mcp__Quant__reconciliation_shadow_days` (args:
    `{ system, dateFrom, dateTo, backtestStats, tolerances? }`, same
-   `backtestStats` shape as `/reconciliation/run`) — then re-evaluate the
+   `backtestStats` shape as `reconciliation_run`) — then re-evaluate the
    promotion gate with the `shadowDays` it returns. If `approved: true`, get
-   the command from `/api/promotion-gate/action` and log a `type:
+   the command from `mcp__Quant__promotion_gate_action` and log a `type:
    "promotion"` entry containing it, clearly flagged for a human to run.
    Never run it yourself.
-   **Why this isn't just N calls to `/reconciliation/run`:** these
+   **Why this isn't just N calls to `reconciliation_run`:** these
    strategies trade a handful of times a month — comparing any ONE day's own
    trades against the backtest would almost never hit the 5-trade minimum to
    even be "comparable," silently defeating the drift check for every
-   low-frequency strategy. `/reconciliation/shadow-days` instead makes each
+   low-frequency strategy. `reconciliation_shadow_days` instead makes each
    day's comparison CUMULATIVE (day N vs. everything from day 1 through N),
    so drift becomes detectable as the shadow period accumulates trades. See
    `backend/src/engine/reconciliation.js`'s `buildShadowDayReports` if this
