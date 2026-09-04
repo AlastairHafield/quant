@@ -33,6 +33,48 @@ export function findUntrackedPosition(positions, contractId) {
   return positions.find((p) => p.contractId === contractId && POSITION_TYPE_TO_DIRECTION[p.type]) ?? null;
 }
 
+// Pure decision for reconcileUntrackedPosition(): given OUR OWN last-known
+// open trade record (tradeJournal.findOpenTrade(), or null) and the broker's
+// current untracked position on our instrument (findUntrackedPosition()'s
+// result, normalized to {contractId, direction, size, averagePrice}, or
+// null), decide what to do. Never adopts a broker position this bot doesn't
+// have a matching journal record for — the earlier version adopted ANY open
+// position on the shared Combine account with no ownership check at all,
+// which silently misattributed 41 other bots' trades to gap-continuation's
+// own ledger (2026-09-04 finding; full diagnosis in the audit log under
+// debateId 41a990f0-ed00-4e30-b8fe-cbb7210d11f3).
+//
+// All three must agree before a broker position counts as "ours":
+//   1. contractId matches (a record for a different contract is unrelated).
+//   2. direction matches (a record for a long says nothing about a short
+//      another bot just opened on the same contract).
+//   3. dayKey matches today — gap-continuation always flattens same-day
+//      (flattenAtET), so an "open" doc from a PRIOR day is definitionally
+//      stale, not a real still-open position to recover. Without this check,
+//      a stale doc left behind by the old bug (or a crash before closeTrade
+//      ever ran) would keep matching forever the next time any bot happens
+//      to hold a same-direction position on this contract.
+// A record that fails any check is stale relative to what the broker shows
+// right now: it gets closed out (so it stops shadowing later polls), but the
+// broker position itself is left untouched — it belongs to whoever actually
+// opened it, not to us.
+export function reconcileDecision({ ownOpenTrade, untrackedPosition, todayDayKey }) {
+  if (!untrackedPosition) {
+    if (ownOpenTrade) return { action: "close_stale", ownOpenTrade, reason: "broker no longer shows this contract open" };
+    return { action: "none" };
+  }
+  if (!ownOpenTrade) return { action: "none" }; // a foreign position — not ours to adopt
+
+  const sameContract = ownOpenTrade.contractId === untrackedPosition.contractId;
+  const sameDirection = ownOpenTrade.direction === untrackedPosition.direction;
+  const sameDay = ownOpenTrade.dayKey === todayDayKey;
+  if (sameContract && sameDirection && sameDay) {
+    return { action: "adopt", ownOpenTrade, position: untrackedPosition };
+  }
+  const reason = !sameContract ? "contract mismatch" : !sameDay ? "stale (prior day)" : "direction mismatch";
+  return { action: "close_stale", ownOpenTrade, reason };
+}
+
 // Pure half of resolveAccountId below — split out so the practice/live
 // branching is directly testable without a live topstepx.resolveAccountId
 // call (TopstepX's ESM named exports can't be mocked with node:test's
@@ -187,29 +229,49 @@ export class Worker {
   async reconcileUntrackedPosition() {
     if (this.openPosition) return;
     const contractId = await topstepx.resolveFrontMonthContractId(CONFIG.instrument);
-    const untracked = findUntrackedPosition(this.openPositions, contractId);
-    if (!untracked) return;
+    const untrackedRaw = findUntrackedPosition(this.openPositions, contractId);
+    const untrackedPosition = untrackedRaw
+      ? {
+          contractId: untrackedRaw.contractId,
+          direction: POSITION_TYPE_TO_DIRECTION[untrackedRaw.type],
+          size: untrackedRaw.size,
+          averagePrice: untrackedRaw.averagePrice,
+        }
+      : null;
 
-    const direction = POSITION_TYPE_TO_DIRECTION[untracked.type];
-    console.error(`Reconciling untracked position: ${direction} ${untracked.size}x @ ${untracked.averagePrice}`);
-    const trade = {
-      direction,
-      entryPrice: untracked.averagePrice,
-      stopPrice: null,
-      targetPrice: null,
-      gapPct: null,
-      size: untracked.size,
-      contractId: untracked.contractId,
-      mfe: 0,
-      mae: 0,
-      mongoId: null,
-    };
+    let ownOpenTrade = null;
     try {
-      trade.mongoId = await tradeJournal.openTrade(trade, nowET().toDateString());
+      ownOpenTrade = await tradeJournal.findOpenTrade();
     } catch (e) {
-      console.error("Mongo openTrade (reconciled) failed:", e.message);
+      console.error("Mongo findOpenTrade failed:", e.message);
+      return; // fail closed — never adopt anything without being able to check ownership first
     }
-    this.openPosition = trade;
+
+    const decision = reconcileDecision({ ownOpenTrade, untrackedPosition, todayDayKey: nowET().toDateString() });
+
+    if (decision.action === "close_stale") {
+      console.error(`Closing stale gap-continuation journal record (${decision.reason}): ${decision.ownOpenTrade._id}`);
+      await tradeJournal
+        .closeTrade(decision.ownOpenTrade._id, { exitPrice: null, outcome: "reconciled_stale", closedAt: new Date().toISOString() })
+        .catch((e) => console.error("closeTrade (stale) failed:", e.message));
+      return;
+    }
+    if (decision.action !== "adopt") return;
+
+    const { ownOpenTrade: matched, position } = decision;
+    console.error(`Reconciling our own open trade: ${matched.direction} ${position.size}x @ ${position.averagePrice}`);
+    this.openPosition = {
+      direction: matched.direction,
+      entryPrice: matched.entryPrice,
+      stopPrice: matched.stopPrice,
+      targetPrice: matched.targetPrice,
+      gapPct: matched.gapPct,
+      size: position.size,
+      contractId: position.contractId,
+      mfe: matched.mfe ?? 0,
+      mae: matched.mae ?? 0,
+      mongoId: matched._id,
+    };
   }
 
   // The bracket's stop OR target filling is the only way a position disappears

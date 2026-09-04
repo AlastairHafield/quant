@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { createWorker, shouldFlushLogNow, findUntrackedPosition, accountNameHintFor } from "../src/worker.js";
+import { createWorker, shouldFlushLogNow, findUntrackedPosition, accountNameHintFor, reconcileDecision } from "../src/worker.js";
 import { CONFIG } from "../src/config.js";
 
 function bar(open, high, low, close) {
@@ -212,6 +212,65 @@ test("findUntrackedPosition: null when nothing matches our contract", () => {
 test("findUntrackedPosition: null when a position matches the contract but has an unrecognized type", () => {
   const positions = [{ contractId: "CON.F.US.MES.U26", type: 99, size: 1, averagePrice: 7462 }];
   assert.equal(findUntrackedPosition(positions, "CON.F.US.MES.U26"), null);
+});
+
+test("reconcileDecision: adopts our own open trade when contract, direction, and day all match", () => {
+  const ownOpenTrade = {
+    _id: "abc123", direction: "long", entryPrice: 101.1, stopPrice: 100.5, targetPrice: 102,
+    gapPct: 0.01, contractId: "CON.F.US.MES.U26", dayKey: "Fri Sep 04 2026", mfe: 3, mae: -1,
+  };
+  const untrackedPosition = { contractId: "CON.F.US.MES.U26", direction: "long", size: 1, averagePrice: 101.1 };
+  const decision = reconcileDecision({ ownOpenTrade, untrackedPosition, todayDayKey: "Fri Sep 04 2026" });
+  assert.equal(decision.action, "adopt");
+  assert.equal(decision.ownOpenTrade, ownOpenTrade);
+  assert.equal(decision.position, untrackedPosition);
+});
+
+test("reconcileDecision: never adopts a foreign bot's position when we have no open trade of our own (the bug this fixes)", () => {
+  const untrackedPosition = { contractId: "CON.F.US.MES.U26", direction: "short", size: 30, averagePrice: 7455.5 };
+  const decision = reconcileDecision({ ownOpenTrade: null, untrackedPosition, todayDayKey: "Fri Sep 04 2026" });
+  assert.equal(decision.action, "none");
+});
+
+test("reconcileDecision: does nothing when neither we nor the broker show a position", () => {
+  const decision = reconcileDecision({ ownOpenTrade: null, untrackedPosition: null, todayDayKey: "Fri Sep 04 2026" });
+  assert.equal(decision.action, "none");
+});
+
+test("reconcileDecision: closes our own record as stale when the broker no longer shows it open", () => {
+  const ownOpenTrade = { _id: "abc123", direction: "long", contractId: "CON.F.US.MES.U26", dayKey: "Fri Sep 04 2026" };
+  const decision = reconcileDecision({ ownOpenTrade, untrackedPosition: null, todayDayKey: "Fri Sep 04 2026" });
+  assert.equal(decision.action, "close_stale");
+  assert.equal(decision.ownOpenTrade, ownOpenTrade);
+});
+
+test("reconcileDecision: a same-contract, same-direction record from a PRIOR day is stale, not adopted (critic-opus's blocking finding)", () => {
+  // Exactly the real production scenario found 2026-09-04: a leftover
+  // status:"open" doc from Jul 30 would otherwise match the next bot that
+  // happens to hold a same-direction position on this contract.
+  const ownOpenTrade = {
+    _id: "stale-jul30", direction: "short", contractId: "CON.F.US.MES.U26", dayKey: "Thu Jul 30 2026",
+  };
+  const untrackedPosition = { contractId: "CON.F.US.MES.U26", direction: "short", size: 10, averagePrice: 7450 };
+  const decision = reconcileDecision({ ownOpenTrade, untrackedPosition, todayDayKey: "Fri Sep 04 2026" });
+  assert.equal(decision.action, "close_stale");
+  assert.equal(decision.reason, "stale (prior day)");
+});
+
+test("reconcileDecision: our own open trade on a DIFFERENT direction than what the broker shows is closed as stale, not adopted onto the wrong side", () => {
+  const ownOpenTrade = { _id: "abc123", direction: "long", contractId: "CON.F.US.MES.U26", dayKey: "Fri Sep 04 2026" };
+  const untrackedPosition = { contractId: "CON.F.US.MES.U26", direction: "short", size: 1, averagePrice: 7455 };
+  const decision = reconcileDecision({ ownOpenTrade, untrackedPosition, todayDayKey: "Fri Sep 04 2026" });
+  assert.equal(decision.action, "close_stale");
+  assert.equal(decision.reason, "direction mismatch");
+});
+
+test("reconcileDecision: our own open trade on a DIFFERENT contract than what the broker shows is closed as stale, not adopted onto the wrong contract", () => {
+  const ownOpenTrade = { _id: "abc123", direction: "long", contractId: "CON.F.US.MES.Z26", dayKey: "Fri Sep 04 2026" };
+  const untrackedPosition = { contractId: "CON.F.US.MES.U26", direction: "long", size: 1, averagePrice: 7455 };
+  const decision = reconcileDecision({ ownOpenTrade, untrackedPosition, todayDayKey: "Fri Sep 04 2026" });
+  assert.equal(decision.action, "close_stale");
+  assert.equal(decision.reason, "contract mismatch");
 });
 
 test("Worker: a reconciled position (no known stop/target) still gets flattened at EOD without guessing STOP-vs-TARGET", async () => {

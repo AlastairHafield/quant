@@ -36,13 +36,13 @@ This routine's job is to spawn and coordinate multiple sub-agents running
 alone. Use your agent/subagent-spawning tool with an explicit model
 override for each role:
 
-- **Proposer** (`model: "claude-sonnet-5"`) — reviews performance, spots an
+- **Proposer** (`model: "sonnet"`) — reviews performance, spots an
   opportunity, drafts a thesis, implements it, runs the backtests.
-- **Critic** (`model: "claude-opus-5"`) — receives the proposer's thesis,
+- **Critic** (`model: "opus"`) — receives the proposer's thesis,
   diff, and backtest evidence *without* having produced any of it, and
   tries specifically to kill it: overfitting, repainting, lookahead bias,
   cherry-picked windows, a walk-forward result that doesn't survive scrutiny.
-- **Second critic** (optional third agent, e.g. `model: "claude-fable-5-1"`)
+- **Second critic** (optional third agent, e.g. `model: "fable"`)
   — spin this one up for any proposal that would touch a strategy currently
   live-trading the real account (not practice-mode-only). For a brand-new
   experimental idea with no live exposure, one critic is enough.
@@ -284,8 +284,26 @@ For each of the three strategies, the **proposer** agent:
    `ACCOUNT_MODE=practice`, to start accumulating shadow days — you cannot
    deploy anything yourself).
 
-7. **If any critic rejects:** do not push anything. Log the rejection with
-   full reasoning so the next run doesn't repeat the same mistake.
+7. **If any critic rejects:** the proposer gets ONE revision attempt in the
+   SAME run before giving up — do not push anything in the meantime.
+   - Re-spawn the proposer (same role, same `debateId`) with the full text of
+     every critic's rejection reasoning. It must address every blocking
+     objection raised, not just the first one, and should say plainly if a
+     critic's objection can't be resolved rather than papering over it.
+   - Re-run the SAME critic(s) that rejected the first draft against the
+     revision (fresh instances — they don't inherit the first round's
+     verdict, so they judge the revision on its own merits). A critic that
+     approved the first draft does not need to re-review a revision that
+     didn't change anything relevant to its own concern, but re-run it
+     anyway if the revision touches entry-execution logic or anything in the
+     Non-negotiable safety rules above.
+   - If every critic approves the revision: proceed to step 6 (push, evaluate
+     the promotion gate, log the final entry) — same `debateId` throughout.
+   - If any critic rejects the revision too: stop. Do not attempt a second
+     revision in the same run. Log the rejection — both rounds' reasoning,
+     not just the final one — with the SAME `debateId`, clearly marked as the
+     final outcome for this run, so the next day's run doesn't repeat either
+     mistake and can decide whether a fresh approach is worth trying.
 
 8. **For an existing proposal that's been shadow-trading:** get its
    `shadowDays` in one call — `mcp__Quant__reconciliation_shadow_days` (args:

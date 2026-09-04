@@ -57,6 +57,19 @@ export async function closeTrade(mongoId, update) {
   await db.collection("trades").updateOne({ _id: mongoId }, { $set: { status: "closed", ...update } });
 }
 
+// Our own last-opened trade still marked "open" — the only thing
+// reconcileUntrackedPosition() in worker.js is allowed to treat as a real
+// position to recover after a restart (see reconcileDecision's header
+// comment for why: adopting ANY open broker position, not just our own,
+// silently misattributed 41 other bots' trades to this ledger — 2026-09-04,
+// debateId 41a990f0-ed00-4e30-b8fe-cbb7210d11f3). Sorted newest-first so a
+// leftover stale doc from the old bug (there should only ever be one open
+// doc at a time going forward) doesn't shadow a real, more recent one.
+export async function findOpenTrade() {
+  const db = await getDb();
+  return db.collection("trades").find({ status: "open" }).sort({ openedAt: -1 }).limit(1).next();
+}
+
 export async function fetchDayRows(dayKey) {
   const db = await getDb();
   return db.collection("signals").find({ dayKey }).sort({ ts: 1 }).toArray();

@@ -1,6 +1,6 @@
 import { addDays, parseISO, format } from 'date-fns';
 import { sma, atr, adx, percentileRank } from './indicators.js';
-// NOTE: db.js (native better-sqlite3) and the Yahoo/Alpaca/Databento fetchers are
+// NOTE: db.js (native better-sqlite3) and the Yahoo/Alpaca/TopstepX fetchers are
 // pulled in via dynamic import inside these async functions only, so any pure
 // engine built on top (backtestCore-style functions) can be imported and swept
 // without loading a native addon.
@@ -11,11 +11,12 @@ import { sma, atr, adx, percentileRank } from './indicators.js';
 
 // Dispatches on `timeframe` — 15m/5m/1h go through FMP/Yahoo (RTH-only), '1m'
 // goes through Alpaca (US equities, ~5yr history but no real pre-market
-// liquidity before ~8am ET), '1m-databento' goes through Databento (near-24hr
-// futures session, e.g. continuous ES/MES, 16yr+ history).
+// liquidity before ~8am ET), '1m-topstepx' goes through TopstepX's own
+// History API (near-24hr futures session, current front-month contract only
+// — see topstepxHistory.js's header comment for what that trades off).
 export async function loadIntradayBars(symbol, fetchFrom, dateTo, apiKey, timeframe = '15m') {
   if (timeframe === '1m') return loadAlpaca1mBars(symbol, fetchFrom, dateTo);
-  if (timeframe === '1m-databento') return loadDatabentoBars(symbol, fetchFrom, dateTo);
+  if (timeframe === '1m-topstepx') return loadTopstepXBars(symbol, fetchFrom, dateTo);
 
   const { getBars15m, getBars5m, upsertBars15m, upsertBars5m } = await import('../data/db.js');
   const { get15mBars } = await import('../api/intraday.js');
@@ -55,41 +56,29 @@ async function loadAlpaca1mBars(symbol, fetchFrom, dateTo) {
   return bars;
 }
 
-// App-level symbol (matches the Yahoo-fetchable ticker used for the daily/ADX/VIX
-// regime data — see loadDaily) mapped to Databento's own continuous-contract
-// symbology, so callers only ever deal in one consistent symbol string.
-const DATABENTO_CONTINUOUS_SYMBOL = { 'ES=F': 'ES.c.0', 'MES=F': 'MES.c.0' };
-
-// 1-minute bars from Databento (near-24hr futures session, e.g. continuous ES) —
-// same cache/staleness pattern as loadAlpaca1mBars, sharing the generic bars_1m
-// table under the app-level symbol key so it can't collide with a real equity
-// ticker and stays consistent with the daily/regime data fetched under the
-// same symbol.
-async function loadDatabentoBars(symbol, fetchFrom, dateTo) {
+// 1-minute bars from TopstepX's own History API (near-24hr futures session,
+// current front-month contract) — same cache/staleness pattern as
+// loadAlpaca1mBars, sharing the generic bars_1m table under the app-level
+// symbol key so it can't collide with a real equity ticker and stays
+// consistent with the daily/regime data fetched under the same symbol.
+async function loadTopstepXBars(symbol, fetchFrom, dateTo) {
   const { getBars1m, upsertBars1m } = await import('../data/db.js');
-  const { getDatabentoBars } = await import('../api/databento.js');
+  const { getTopstepXBars } = await import('../api/topstepxHistory.js');
   let bars = getBars1m(symbol, fetchFrom, dateTo);
   const cachedMin = bars[0]?.date;
   const cachedMax = bars[bars.length - 1]?.date;
   // Tolerance on both ends (same idea as loadDaily's staleHead/staleTail),
   // not an exact match against fetchFrom/dateTo — real market data can't have
-  // a bar on the weekend date fetchFrom might land on, and Databento's own
+  // a bar on the weekend date fetchFrom might land on, and TopstepX's own
   // available range trails "now" by a bit (won't serve the still-in-progress
-  // trading day). Comparing with zero slack made cacheStale evaluate true
-  // forever even once the cache was actually complete, refetching 10+ years
-  // of data on every single call.
+  // trading day).
   const staleHead = format(addDays(parseISO(fetchFrom), 7), 'yyyy-MM-dd');
   const staleTail = format(addDays(parseISO(dateTo), -3), 'yyyy-MM-dd');
   const cacheStale = bars.length === 0 || cachedMin > staleHead || cachedMax < staleTail;
   if (cacheStale) {
-    const databentoSymbol = DATABENTO_CONTINUOUS_SYMBOL[symbol] || symbol;
-    console.log(`Fetching 1m data for ${symbol} (${fetchFrom} to ${dateTo}) from Databento (${databentoSymbol})...`);
-    // Persisted chunk-by-chunk (see getDatabentoBars) rather than collected into
-    // one array and upserted at the end — a multi-year 1-minute pull is millions
-    // of bar objects, too large to hold in memory at once (confirmed live: this
-    // crashed the process with an OOM before ever reaching this line).
-    const totalBars = await getDatabentoBars(databentoSymbol, fetchFrom, dateTo, (chunkBars) => {
-      upsertBars1m(chunkBars.map(b => ({ ...b, symbol }))); // store under the app-level symbol
+    console.log(`Fetching 1m data for ${symbol} (${fetchFrom} to ${dateTo}) from TopstepX...`);
+    const totalBars = await getTopstepXBars(symbol, fetchFrom, dateTo, (chunkBars) => {
+      upsertBars1m(chunkBars);
     });
     if (totalBars > 0) {
       bars = getBars1m(symbol, fetchFrom, dateTo);
@@ -153,7 +142,7 @@ export function buildRegimeMap(dailyBars, vixBars) {
 
 // 1-minute bars carrying real per-minute aggressor buy/sell volume (from
 // tickVolumeMongo.js — see that file for why this is Mongo, not the SQLite
-// bar cache below), joined onto the OHLCV bars_1m/Databento cache by
+// bar cache below), joined onto the OHLCV bars_1m/TopstepX cache by
 // date+ny_time, plus the same prior-day ADX regime map every other engine
 // uses. Deliberately refuses to run on plain OHLCV with no real tick-derived
 // volume — orderFlowBacktest.js's entire premise is aggressor buy/sell volume
@@ -170,12 +159,11 @@ export async function loadOrderFlowBars(symbol, dateFrom, dateTo, params = {}) {
   // No fetchFrom pre-buffer here, unlike loadAllData below — this engine has
   // no cross-day warmup indicator (no ATR/VWAP-style rolling calc reaching
   // back before dateFrom; each day's session profile is built from that
-  // day's own bars only), so a week of pre-dateFrom Databento 1-minute bars
+  // day's own bars only), so a week of pre-dateFrom TopstepX 1-minute bars
   // would just be fetched and immediately discarded by the date filter a few
-  // lines down — pure wasted cost on data that's already ~90x the price of
-  // 1-min OHLCV (see databento.js).
+  // lines down — pure wasted cost for no benefit.
   const [ohlcvBars, tickVolRows, daily, vix] = await Promise.all([
-    loadIntradayBars(symbol, dateFrom, dateTo, params.apiKey, params.timeframe || '1m-databento'),
+    loadIntradayBars(symbol, dateFrom, dateTo, params.apiKey, params.timeframe || '1m-topstepx'),
     getTickVolume1m(symbol, dateFrom, dateTo),
     loadDaily(symbol, warmupFrom, dateTo),
     loadDaily('^VIX', warmupFrom, dateTo),
