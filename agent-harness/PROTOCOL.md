@@ -42,7 +42,8 @@ override for each role:
   diff, and backtest evidence *without* having produced any of it, and
   tries specifically to kill it: overfitting, repainting, lookahead bias,
   cherry-picked windows, a walk-forward result that doesn't survive scrutiny.
-- **Second critic** (optional third agent, e.g. `model: "fable"`)
+- **Second critic** (optional third agent, `model: "haiku"` — never `"fable"`,
+  which is a paid-tier model the user has not opted into)
   — spin this one up for any proposal that would touch a strategy currently
   live-trading the real account (not practice-mode-only). For a brand-new
   experimental idea with no live exposure, one critic is enough.
