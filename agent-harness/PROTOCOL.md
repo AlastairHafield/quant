@@ -192,7 +192,7 @@ shape the old HTTP routes used.
 | `mcp__Quant__ledger_trades` | Raw trades, optionally by `system`/`dayKey`/`closedFrom`/`closedTo` |
 | `mcp__Quant__orb_backtest_run` / `orb_walkforward_run` | Mechanical ORB backtest / walk-forward. Args: `{ symbol, dateFrom, dateTo, params?/baseParams?, grid?, numFolds? }` |
 | `mcp__Quant__gapfill_backtest_run` / `gapfill_walkforward_run` | Gap-continuation backtest / walk-forward, same arg shape |
-| `mcp__Quant__orderflow_backtest_run` | Order Flow Bot backtest (data-gated — see below) |
+| `mcp__Quant__orderflow_backtest_run` | Order Flow Bot backtest (data-gated — see below). **`symbol` must be `"ES"`, not `"MES"`** — tick volume is captured against `INSTRUMENT_DATA` (the DOM/data feed), not `INSTRUMENT_TRADE` (what's actually traded); `"MES"` will always return the "no data" error even when real data exists |
 | `mcp__Quant__reconciliation_run` | Live-vs-backtest drift for one strategy. Args: `{ system, closedFrom, closedTo, backtestStats, tolerances? }` (`system` is the Mongo db name: `gex_breakout` \| `mechanical_orb` \| `gap_continuation`; `backtestStats` is a backtest run's `metrics.full` or `.oos`) |
 | `mcp__Quant__reconciliation_shadow_days` | Build promotion-gate-ready `shadowDays` (cumulative per day). Args: `{ system, dateFrom, dateTo, backtestStats, tolerances? }` |
 | `mcp__Quant__promotion_gate_evaluate` | Args: `{ walkForward, regime, deflated, shadowDays, criteria? }` |
@@ -209,8 +209,13 @@ directory-name form (see `backend/src/engine/promotionAction.js`'s mapping).
 calling gex-breakout's own live `evaluateOrderFlowBot`/`evaluateOrderFlowExit`
 directly (not a reimplementation) via `mcp__Quant__orderflow_backtest_run`
 (`{ symbol, dateFrom, dateTo, params? }`, same response shape as
-`orb_backtest_run`). Read the file's header comment before trusting any
-result from it — two honest, load-bearing gaps:
+`orb_backtest_run`). **Pass `symbol: "ES"`** — the bot's DOM/order-flow data
+comes from `INSTRUMENT_DATA` (ES), not `INSTRUMENT_TRADE` (MES, what
+actually gets traded); `tickVolumeReporter.js` captures and stores under the
+data symbol, so `"MES"` silently finds nothing even with real data present
+(confirmed live 2026-09-07: `symbol:"MES"` -> "no data captured", identical
+range with `symbol:"ES"` -> 6 real trades). Read the file's header comment
+before trusting any result from it — two honest, load-bearing gaps:
 
 1. **It needs real per-minute aggressor buy/sell volume**, captured live by
    `gex-breakout/src/tickVolumeReporter.js` (posted to `POST

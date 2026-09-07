@@ -107,7 +107,7 @@ export function createBackendMcpServer() {
 
   server.registerTool('orderflow_backtest_run', {
     title: 'Order Flow Bot backtest (data-gated)',
-    description: 'Backtests gex-breakout\'s Order Flow Bot by calling its own live decision code directly. Needs real per-minute aggressor buy/sell volume captured by tickVolumeReporter.js since it started running — will error for any range that predates or has gaps in that capture. Read orderFlowBacktest.js\'s header comment (footprintZones/TIGHTEN_TO_PRICE caveats) before trusting a TREND-day result.',
+    description: 'Backtests gex-breakout\'s Order Flow Bot by calling its own live decision code directly. Pass symbol: "ES" (the DOM/data instrument, INSTRUMENT_DATA) -- NOT "MES" (the traded instrument, INSTRUMENT_TRADE); tick volume is captured and stored under the data symbol, so "MES" always returns "no data" even when real data exists. Needs real per-minute aggressor buy/sell volume captured by tickVolumeReporter.js since it started running — will error for any range that predates or has gaps in that capture. Read orderFlowBacktest.js\'s header comment (footprintZones/TIGHTEN_TO_PRICE caveats) before trusting a TREND-day result.',
     inputSchema: { symbol: z.string(), dateFrom: z.string(), dateTo: z.string(), params: z.record(z.any()).optional() },
   }, async ({ symbol, dateFrom, dateTo, params }) => {
     try { return textResult({ success: true, data: await runOrderFlowBacktest(symbol, dateFrom, dateTo, params || {}) }); }
