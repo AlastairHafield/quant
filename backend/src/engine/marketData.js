@@ -154,6 +154,14 @@ export function buildRegimeMap(dailyBars, vixBars) {
 // that's been running long enough to cover the requested range.
 export async function loadOrderFlowBars(symbol, dateFrom, dateTo, params = {}) {
   const { getTickVolume1m } = await import('../data/tickVolumeMongo.js');
+  // tickVolumeReporter.js writes under its own app-level key ("MES" ->
+  // "MES=F", see its APP_LEVEL_SYMBOL) — callers of this backtest (the
+  // agent-harness routine, PROTOCOL.md's own examples) pass the plain
+  // TopstepX-style symbol ("MES"), so the Mongo lookup must normalize
+  // through the same mapping or it silently finds nothing, per that file's
+  // own header comment on this exact join.
+  const { appLevelSymbolFor } = await import('../../../gex-breakout/src/tickVolumeReporter.js');
+  const tickVolSymbol = appLevelSymbolFor(symbol);
   const warmupFrom = format(addDays(parseISO(dateFrom), -300), 'yyyy-MM-dd');
 
   // No fetchFrom pre-buffer here, unlike loadAllData below — this engine has
@@ -164,7 +172,7 @@ export async function loadOrderFlowBars(symbol, dateFrom, dateTo, params = {}) {
   // lines down — pure wasted cost for no benefit.
   const [ohlcvBars, tickVolRows, daily, vix] = await Promise.all([
     loadIntradayBars(symbol, dateFrom, dateTo, params.apiKey, params.timeframe || '1m-topstepx'),
-    getTickVolume1m(symbol, dateFrom, dateTo),
+    getTickVolume1m(tickVolSymbol, dateFrom, dateTo),
     loadDaily(symbol, warmupFrom, dateTo),
     loadDaily('^VIX', warmupFrom, dateTo),
   ]);
