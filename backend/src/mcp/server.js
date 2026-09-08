@@ -6,7 +6,7 @@ import { runOrderFlowBacktest } from '../engine/orderFlowBacktest.js';
 import { fetchLedgerTrades, fetchDailyLedger } from '../data/tradeJournalMongo.js';
 import { summarizeLiveTrades, computeLiveVsBacktestDrift, groupTradesByDay, buildShadowDayReports } from '../engine/reconciliation.js';
 import { evaluatePromotionGate } from '../engine/promotionGate.js';
-import { describePromotionAction } from '../engine/promotionAction.js';
+import { describePromotionAction, executePromotionAction } from '../engine/promotionAction.js';
 import { logAuditEntry, fetchAuditLog } from '../data/agentAuditLog.js';
 
 // MCP front door onto this same backend, for the scheduled agent-harness
@@ -165,6 +165,15 @@ export function createBackendMcpServer() {
     inputSchema: { strategy: z.string(), gateResult: z.record(z.any()) },
   }, async ({ strategy, gateResult }) => {
     try { return textResult({ success: true, data: describePromotionAction(strategy, gateResult) }); }
+    catch (e) { return errorResult(e); }
+  });
+
+  server.registerTool('promotion_gate_execute', {
+    title: 'Actually flip a strategy live (real money)',
+    description: 'Executes the promotion action via the Heroku Platform API instead of just describing it — sets the strategy\'s EXECUTION_ENABLED-style config var to true if gateResult.approved. The credential for this lives only in this backend\'s own config, never in the agent-harness sandbox. This is a real, immediate, real-money action — only call it with a gateResult you actually got back from promotion_gate_evaluate for this exact strategy, never a fabricated or assumed one. strategy uses the directory-name form (gap-continuation | mechanical-orb | gex-breakout).',
+    inputSchema: { strategy: z.string(), gateResult: z.record(z.any()) },
+  }, async ({ strategy, gateResult }) => {
+    try { return textResult({ success: true, data: await executePromotionAction(strategy, gateResult) }); }
     catch (e) { return errorResult(e); }
   });
 

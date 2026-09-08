@@ -18,11 +18,10 @@ Three live trading bots run on Heroku, each trading TopstepX futures
 A shared backend (`backend/`) exposes backtesting, a unified performance
 ledger, and a promotion-gate pipeline, reachable through the `Quant` MCP
 connector. **You push approved code straight to both `origin` (GitHub) and
-`heroku` — this is a real deploy, not a no-op.** See rule 3 below for exactly
-what that does and does not include. Flipping a strategy from
-practice-mode shadow-trading to real-money execution (`EXECUTION_ENABLED`)
-is a separate, still-human-run action — never assume a code deploy also
-does that.
+`heroku`, and you flip strategies live yourself — both are real, immediate,
+real-money-relevant actions, not no-ops.** See rule 3 below for exactly how
+each one works and how they differ; never assume a code deploy also flips
+`EXECUTION_ENABLED`, or vice versa.
 
 **The goal is $150/day average net profit across the real account.** Use
 this as context for how material a drift or an opportunity actually is —
@@ -103,24 +102,26 @@ unrelated debate for the same strategy.
    the same thing before approving — this is exactly the kind of change
    easy to break without noticing, since the existing tests would still pass
    for the strategy's own logic while silently removing the guard around it.
-3. **Deploying code and flipping a strategy live are two different things —
-   never confuse them.** You now have a `HEROKU_API_KEY` env var (a git
-   credential for `git.heroku.com`, nothing more) — use it ONLY to run
-   `git push heroku main` right after `git push origin main`, and for
-   nothing else. Specifically:
-   - **Never run `heroku config:set` or any other `heroku` CLI command that
-     changes config vars, dynos, or add-ons.** The key you have is a plain
-     git-push credential, not a general Heroku CLI login — don't try to use
-     it as one.
-   - **Never set or imply a change to any `*_EXECUTION_ENABLED` flag.** That
-     is what actually puts real money behind a strategy, and it stays a
-     human-run action via `mcp__Quant__promotion_gate_action`'s generated
-     command (see step 8) — a code deploy must never be treated as
-     equivalent to that, even if the deployed diff includes a `config.js`
-     change to a *different* param.
-   If `HEROKU_API_KEY` isn't set in your environment for some run, that's a
-   real gap, not a signal to work around it — log a `type: "error"` audit
-   entry and push to `origin` only for that run.
+3. **You now execute both halves of this pipeline yourself — deploying code
+   and flipping a strategy live.** Two different mechanisms, use the right
+   one:
+   - **Code deploy**: `HEROKU_API_KEY` env var is a git credential for
+     `git.heroku.com` — run `git push heroku main` right after
+     `git push origin main`. If it isn't set for some run, that's a real
+     gap, not a signal to work around it: log a `type: "error"` audit entry
+     and push to `origin` only for that run.
+   - **Flipping `EXECUTION_ENABLED`** (putting real money behind a
+     strategy): call `mcp__Quant__promotion_gate_execute` — it PATCHes the
+     Heroku config var server-side via a credential that lives only in the
+     backend, never in your own environment. Only call it with a
+     `gateResult` you actually got back from `promotion_gate_evaluate` for
+     that exact strategy in this same run — never a fabricated, assumed, or
+     remembered-from-a-prior-run one. See step 8.
+   - **Never run `heroku config:set` or any other `heroku` CLI command
+     yourself.** `HEROKU_API_KEY` is a plain git-push credential, not a
+     general Heroku CLI login — `promotion_gate_execute` is the only path to
+     an actual config-var change, specifically because that credential is
+     not in your reach.
 4. **Push straight to `main` on both `origin` and `heroku` once every critic
    approves — never before.** The unanimous-critic gate in "You are not one
    agent" IS the review step; there is no human-review branch stage anymore.
@@ -128,10 +129,10 @@ unrelated debate for the same strategy.
    cannot know this for certain), this deploy changes its real-money
    behavior on the next dyno restart — immediately, with no practice-mode
    staging in between.** A code deploy does not by itself turn on a
-   currently-off strategy (that's `EXECUTION_ENABLED`, rule 3, still
-   human-run), but it CAN change what an already-on one does. This makes the
-   unanimous-critic gate the only check standing between a change and real
-   money for anything touching entry-execution logic — which is exactly why
+   currently-off strategy (that's `EXECUTION_ENABLED`, rule 3), but it CAN
+   change what an already-on one does. This makes the unanimous-critic gate
+   the only check standing between a change and real money for anything
+   touching entry-execution logic — which is exactly why
    the second-critic requirement above for live-exposed strategies is not
    optional. A rejected thesis (any critic objects) is never pushed
    anywhere — only logged.
@@ -219,7 +220,8 @@ shape the old HTTP routes used.
 | `mcp__Quant__reconciliation_run` | Live-vs-backtest drift for one strategy. Args: `{ system, closedFrom, closedTo, backtestStats, tolerances? }` (`system` is the Mongo db name: `gex_breakout` \| `mechanical_orb` \| `gap_continuation`; `backtestStats` is a backtest run's `metrics.full` or `.oos`) |
 | `mcp__Quant__reconciliation_shadow_days` | Build promotion-gate-ready `shadowDays` (cumulative per day). Args: `{ system, dateFrom, dateTo, backtestStats, tolerances? }` |
 | `mcp__Quant__promotion_gate_evaluate` | Args: `{ walkForward, regime, deflated, shadowDays, criteria? }` |
-| `mcp__Quant__promotion_gate_action` | Get the (unexecuted) promotion command. Args: `{ strategy, gateResult }` |
+| `mcp__Quant__promotion_gate_action` | Get the (unexecuted) promotion command — for logging/display only now, see `promotion_gate_execute`. Args: `{ strategy, gateResult }` |
+| `mcp__Quant__promotion_gate_execute` | Actually flips the strategy live (PATCHes the Heroku config var). Args: `{ strategy, gateResult }`. Returns `{ executed, error? }` — check both, a non-throwing failure is not a success |
 | `mcp__Quant__audit_log_write` | Auto-posts to Discord. Args: `{ type: "watch"\|"proposal"\|"grade"\|"promotion"\|"demotion"\|"error", role: "proposer"\|"critic-opus"\|..., strategy, summary, details?, debateId? }` — omit `debateId` on a `proposal` entry to get one generated; required on every entry responding to that proposal (see "Thread every response" above) |
 | `mcp__Quant__audit_log_read` | Args: `{ strategy?, type?, debateId?, limit? }` |
 
@@ -339,10 +341,13 @@ For each of the three strategies, the **proposer** agent:
    `shadowDays` in one call — `mcp__Quant__reconciliation_shadow_days` (args:
    `{ system, dateFrom, dateTo, backtestStats, tolerances? }`, same
    `backtestStats` shape as `reconciliation_run`) — then re-evaluate the
-   promotion gate with the `shadowDays` it returns. If `approved: true`, get
-   the command from `mcp__Quant__promotion_gate_action` and log a `type:
-   "promotion"` entry containing it, clearly flagged for a human to run.
-   Never run it yourself.
+   promotion gate with the `shadowDays` it returns. If `approved: true`, call
+   `mcp__Quant__promotion_gate_execute` with that exact `gateResult` to
+   actually flip the strategy live, then log a `type: "promotion"` entry with
+   what you called it with and what it returned (`executed`, and `error` if
+   Heroku rejected it — check this field, a non-throwing failure is not a
+   success). If `executed: false` with an error, do not retry silently in the
+   same run — log it and stop for this strategy.
    **Why this isn't just N calls to `reconciliation_run`:** these
    strategies trade a handful of times a month — comparing any ONE day's own
    trades against the backtest would almost never hit the 5-trade minimum to

@@ -1,6 +1,15 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { describePromotionAction } from '../src/engine/promotionAction.js';
+import { describePromotionAction, executePromotionAction } from '../src/engine/promotionAction.js';
+
+async function withMockedFetch(response, fn) {
+  const originalFetch = global.fetch;
+  const originalKey = process.env.HEROKU_PLATFORM_API_KEY;
+  process.env.HEROKU_PLATFORM_API_KEY = 'test-key';
+  global.fetch = async () => response;
+  try { await fn(); }
+  finally { global.fetch = originalFetch; process.env.HEROKU_PLATFORM_API_KEY = originalKey; }
+}
 
 test('describePromotionAction: unknown strategy produces no action', () => {
   const result = describePromotionAction('not-a-real-strategy', { approved: true });
@@ -39,4 +48,42 @@ test('describePromotionAction: never actually executes anything — the command 
   const result = describePromotionAction('gap-continuation', { approved: true });
   assert.equal(typeof result.command, 'string');
   assert.ok(result.note.toLowerCase().includes('not executed'));
+});
+
+test('executePromotionAction: an unapproved gate result executes nothing', async () => {
+  const result = await executePromotionAction('gap-continuation', { approved: false });
+  assert.equal(result.action, 'none');
+  assert.equal(result.executed, false);
+});
+
+test('executePromotionAction: throws if HEROKU_PLATFORM_API_KEY is unset', async () => {
+  const originalKey = process.env.HEROKU_PLATFORM_API_KEY;
+  delete process.env.HEROKU_PLATFORM_API_KEY;
+  try {
+    await assert.rejects(() => executePromotionAction('gap-continuation', { approved: true }));
+  } finally {
+    process.env.HEROKU_PLATFORM_API_KEY = originalKey;
+  }
+});
+
+test('executePromotionAction: PATCHes the Heroku config-vars API and reports executed:true on success', async () => {
+  await withMockedFetch(
+    { ok: true, json: async () => ({ GAP_CONTINUATION_EXECUTION_ENABLED: 'true' }) },
+    async () => {
+      const result = await executePromotionAction('gap-continuation', { approved: true });
+      assert.equal(result.executed, true);
+      assert.deepEqual(result.data, { GAP_CONTINUATION_EXECUTION_ENABLED: 'true' });
+    },
+  );
+});
+
+test('executePromotionAction: reports executed:false with the error, not a throw, on a Heroku API failure', async () => {
+  await withMockedFetch(
+    { ok: false, status: 401, text: async () => 'Unauthorized' },
+    async () => {
+      const result = await executePromotionAction('gap-continuation', { approved: true });
+      assert.equal(result.executed, false);
+      assert.match(result.error, /401/);
+    },
+  );
 });
