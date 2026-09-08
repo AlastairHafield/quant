@@ -50,12 +50,13 @@ export function createBackendMcpServer() {
 
   server.registerTool('ledger_trades', {
     title: 'Raw ledger trades',
-    description: 'Raw trade docs, optionally filtered by system (Mongo db name: gap_continuation | mechanical_orb | gex_breakout), dayKey, or a closedFrom/closedTo range (bare YYYY-MM-DD or full ISO timestamps).',
+    description: 'Raw trade docs, optionally filtered by system (Mongo db name: gap_continuation | mechanical_orb | gex_breakout), dayKey, closedFrom/closedTo range (bare YYYY-MM-DD or full ISO timestamps), or strategy (a trade doc\'s own `strategy` field — e.g. for gex_breakout: "OF" = Order Flow Bot signal trades, "reconciled" = untracked shared-account fills NOT from OF signals, "B" = retired legacy strategy; omit to get all of them pooled together, which is almost never what you want when comparing against an OF-specific backtest).',
     inputSchema: {
       system: z.string().optional(),
       dayKey: z.string().optional(),
       closedFrom: z.string().optional(),
       closedTo: z.string().optional(),
+      strategy: z.string().optional(),
       limit: z.number().optional(),
     },
   }, async (args) => {
@@ -116,33 +117,35 @@ export function createBackendMcpServer() {
 
   server.registerTool('reconciliation_run', {
     title: 'Live-vs-backtest drift for one strategy',
-    description: 'Compares a strategy\'s actual recent live trades against a backtest\'s predicted stats over the same window. backtestStats is a backtest run\'s metrics.full or .oos (from *_backtest_run above).',
+    description: 'Compares a strategy\'s actual recent live trades against a backtest\'s predicted stats over the same window. backtestStats is a backtest run\'s metrics.full or .oos (from *_backtest_run above). Pass `strategy` to restrict live trades to one `strategy`-field value (see ledger_trades) — required for a meaningful gex-breakout/OF-backtest comparison, since unfiltered live trades there pool OF signal trades together with unrelated "reconciled"/"B" activity.',
     inputSchema: {
       system: z.string(), closedFrom: z.string(), closedTo: z.string(),
       backtestStats: z.record(z.any()), tolerances: z.record(z.any()).optional(),
+      strategy: z.string().optional(),
     },
-  }, async ({ system, closedFrom, closedTo, backtestStats, tolerances }) => {
+  }, async ({ system, closedFrom, closedTo, backtestStats, tolerances, strategy }) => {
     try {
-      const liveTrades = await fetchLedgerTrades({ system, closedFrom, closedTo, limit: 2000 });
+      const liveTrades = await fetchLedgerTrades({ system, closedFrom, closedTo, strategy, limit: 2000 });
       const liveStats = summarizeLiveTrades(liveTrades);
       const drift = computeLiveVsBacktestDrift(liveStats, backtestStats, tolerances || {});
-      return textResult({ success: true, data: { system, closedFrom, closedTo, liveStats, backtestStats, ...drift } });
+      return textResult({ success: true, data: { system, closedFrom, closedTo, strategy: strategy || null, liveStats, backtestStats, ...drift } });
     } catch (e) { return errorResult(e); }
   });
 
   server.registerTool('reconciliation_shadow_days', {
     title: 'Build promotion-gate shadowDays (cumulative per day)',
-    description: 'Builds promotionGate\'s shadowDays array in one call. Each day\'s comparison is CUMULATIVE (day 1..N, not day N alone) — these strategies trade too infrequently for a single day to hit the 5-trade minimum to be comparable. See reconciliation.js\'s buildShadowDayReports.',
+    description: 'Builds promotionGate\'s shadowDays array in one call. Each day\'s comparison is CUMULATIVE (day 1..N, not day N alone) — these strategies trade too infrequently for a single day to hit the 5-trade minimum to be comparable. See reconciliation.js\'s buildShadowDayReports. Pass `strategy` to restrict to one `strategy`-field value (see ledger_trades / reconciliation_run).',
     inputSchema: {
       system: z.string(), dateFrom: z.string(), dateTo: z.string(),
       backtestStats: z.record(z.any()), tolerances: z.record(z.any()).optional(),
+      strategy: z.string().optional(),
     },
-  }, async ({ system, dateFrom, dateTo, backtestStats, tolerances }) => {
+  }, async ({ system, dateFrom, dateTo, backtestStats, tolerances, strategy }) => {
     try {
-      const trades = await fetchLedgerTrades({ system, closedFrom: dateFrom, closedTo: dateTo, limit: 2000 });
+      const trades = await fetchLedgerTrades({ system, closedFrom: dateFrom, closedTo: dateTo, strategy, limit: 2000 });
       const dailyGroups = groupTradesByDay(trades);
       const shadowDays = buildShadowDayReports(dailyGroups, backtestStats, tolerances || {});
-      return textResult({ success: true, data: { system, dateFrom, dateTo, shadowDays } });
+      return textResult({ success: true, data: { system, dateFrom, dateTo, strategy: strategy || null, shadowDays } });
     } catch (e) { return errorResult(e); }
   });
 

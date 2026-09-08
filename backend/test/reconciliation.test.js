@@ -120,6 +120,76 @@ test('buildShadowDayReports: makes each day CUMULATIVE, so a low-frequency strat
   assert.equal(reports[4].drift.drift, false); // 100 expectancy / 60% win rate both within tolerance of the 100/55 backtest
 });
 
+// ─── strategy-field conflation (the bug this fix addresses) ─────────────
+// gex-breakout's ledger pools three categories under `strategy`: "OF" (the
+// Order Flow Bot's own signal trades — the ONLY thing the OF backtest
+// models), "reconciled" (untracked shared-account fills that are NOT OF
+// signals), and "B" (a retired legacy strategy). Filtering live trades to
+// strategy:"OF" (now doable via fetchLedgerTrades'/the MCP tools' new
+// `strategy` param, backed by buildLedgerQuery) before summarizing/
+// reconciling must exclude the other categories — demonstrated here at the
+// summarizeLiveTrades/computeLiveVsBacktestDrift level, which is what
+// actually receives the (now-filterable) trade list.
+test('summarizeLiveTrades: filtering to strategy "OF" excludes unrelated "reconciled"/"B" trades and changes the stats', () => {
+  const mixedTrades = [
+    { status: 'closed', realizedPnl: 66.25, strategy: 'OF' },
+    { status: 'closed', realizedPnl: -20, strategy: 'OF' },
+    { status: 'closed', realizedPnl: 1000, strategy: 'reconciled' }, // NOT an OF signal trade
+    { status: 'closed', realizedPnl: 500, strategy: 'reconciled' },
+    { status: 'closed', realizedPnl: -75, strategy: 'B' }, // retired legacy strategy
+  ];
+
+  const pooled = summarizeLiveTrades(mixedTrades); // old, conflated behavior
+  assert.equal(pooled.totalTrades, 5);
+
+  const ofOnly = summarizeLiveTrades(mixedTrades.filter((t) => t.strategy === 'OF'));
+  assert.equal(ofOnly.totalTrades, 2);
+  assert.equal(ofOnly.totalPnlDollars, 46.25);
+  assert.equal(ofOnly.expectancy, 23.13);
+
+  // The two comparisons diverge sharply — proof the pooled figure is
+  // dominated by non-OF activity and is not a fair comparison against an
+  // OF-only backtest.
+  assert.notEqual(pooled.totalPnlDollars, ofOnly.totalPnlDollars);
+  assert.notEqual(pooled.expectancy, ofOnly.expectancy);
+});
+
+test('computeLiveVsBacktestDrift: pooled (unfiltered) trades can show spurious drift that strategy-filtered trades do not', () => {
+  // An OF backtest predicting a losing bot (expectancy -500ish/trade).
+  const backtest = { totalTrades: 6, winRate: 16.67, expectancy: -576.57, totalPnlDollars: -3459.40 };
+
+  const mixedTrades = [
+    { status: 'closed', realizedPnl: 66.25, strategy: 'OF' },
+    { status: 'closed', realizedPnl: -20, strategy: 'OF' },
+    { status: 'closed', realizedPnl: -20, strategy: 'OF' },
+    { status: 'closed', realizedPnl: -15, strategy: 'OF' },
+    { status: 'closed', realizedPnl: -15, strategy: 'OF' },
+    { status: 'closed', realizedPnl: -6, strategy: 'OF' },
+    { status: 'closed', realizedPnl: -6.25, strategy: 'OF' },
+    // Unrelated "reconciled" fills that make the pooled live P&L look
+    // healthy even though the OF bot itself is losing on almost every trade.
+    { status: 'closed', realizedPnl: 400, strategy: 'reconciled' },
+    { status: 'closed', realizedPnl: 300, strategy: 'reconciled' },
+    { status: 'closed', realizedPnl: 250, strategy: 'reconciled' },
+    { status: 'closed', realizedPnl: 300, strategy: 'reconciled' },
+  ];
+
+  const pooledStats = summarizeLiveTrades(mixedTrades);
+  const pooledDrift = computeLiveVsBacktestDrift(pooledStats, backtest);
+  assert.equal(pooledDrift.comparable, true);
+  // Pooled live looks profitable while the backtest predicts a heavy loss —
+  // this is the spurious "huge divergence" the conflation produces.
+  assert.ok(pooledStats.expectancy > 0);
+
+  const ofOnlyStats = summarizeLiveTrades(mixedTrades.filter((t) => t.strategy === 'OF'));
+  const ofOnlyDrift = computeLiveVsBacktestDrift(ofOnlyStats, backtest);
+  assert.equal(ofOnlyDrift.comparable, true);
+  // OF-only live is directionally consistent with the backtest (both losing),
+  // even if the exact dollar magnitude still differs (a separate, honestly
+  // unresolved ES-vs-MES/notional question — see PROTOCOL.md).
+  assert.ok(ofOnlyStats.expectancy < 0);
+});
+
 test('buildShadowDayReports: a real, sustained drift is still caught cumulatively', () => {
   const backtest = { totalTrades: 500, winRate: 55, expectancy: 100 };
   const dailyGroups = [
