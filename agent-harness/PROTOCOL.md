@@ -17,8 +17,12 @@ Three live trading bots run on Heroku, each trading TopstepX futures
 
 A shared backend (`backend/`) exposes backtesting, a unified performance
 ledger, and a promotion-gate pipeline, reachable through the `Quant` MCP
-connector. **You do not have deploy credentials.** Getting code live on the real account always ends with a
-human running a command you generate; never assume otherwise.
+connector. **You push approved code straight to both `origin` (GitHub) and
+`heroku` — this is a real deploy, not a no-op.** See rule 3 below for exactly
+what that does and does not include. Flipping a strategy from
+practice-mode shadow-trading to real-money execution (`EXECUTION_ENABLED`)
+is a separate, still-human-run action — never assume a code deploy also
+does that.
 
 **The goal is $150/day average net profit across the real account.** Use
 this as context for how material a drift or an opportunity actually is —
@@ -99,20 +103,38 @@ unrelated debate for the same strategy.
    the same thing before approving — this is exactly the kind of change
    easy to break without noticing, since the existing tests would still pass
    for the strategy's own logic while silently removing the guard around it.
-3. **Never run `heroku` commands, never modify Heroku config vars, never
-   attempt to reach `git.heroku.com`.** You have no credentials for this and
-   should not try to acquire any. The one and only way you affect what's
-   live is: commit approved code to `main`, and (if warranted) generate a
-   promotion command via `mcp__Quant__promotion_gate_action` for a human to
-   run.
-4. **Push straight to `main` once every critic approves — never before.**
-   The unanimous-critic gate in "You are not one agent" IS the review step;
-   there is no separate human-review branch stage anymore. This still only
-   moves code — it does not touch the live account (see rule 3): deploying
-   still means generating a command via `mcp__Quant__promotion_gate_action`
-   for a human to run, and that still requires the promotion gate to pass
-   (which a brand-new proposal won't, on `shadowDays`). A rejected thesis
-   (any critic objects) is never pushed at all — only logged.
+3. **Deploying code and flipping a strategy live are two different things —
+   never confuse them.** You now have a `HEROKU_API_KEY` env var (a git
+   credential for `git.heroku.com`, nothing more) — use it ONLY to run
+   `git push heroku main` right after `git push origin main`, and for
+   nothing else. Specifically:
+   - **Never run `heroku config:set` or any other `heroku` CLI command that
+     changes config vars, dynos, or add-ons.** The key you have is a plain
+     git-push credential, not a general Heroku CLI login — don't try to use
+     it as one.
+   - **Never set or imply a change to any `*_EXECUTION_ENABLED` flag.** That
+     is what actually puts real money behind a strategy, and it stays a
+     human-run action via `mcp__Quant__promotion_gate_action`'s generated
+     command (see step 8) — a code deploy must never be treated as
+     equivalent to that, even if the deployed diff includes a `config.js`
+     change to a *different* param.
+   If `HEROKU_API_KEY` isn't set in your environment for some run, that's a
+   real gap, not a signal to work around it — log a `type: "error"` audit
+   entry and push to `origin` only for that run.
+4. **Push straight to `main` on both `origin` and `heroku` once every critic
+   approves — never before.** The unanimous-critic gate in "You are not one
+   agent" IS the review step; there is no human-review branch stage anymore.
+   **If the strategy you touched is currently live-trading (rule 5: you
+   cannot know this for certain), this deploy changes its real-money
+   behavior on the next dyno restart — immediately, with no practice-mode
+   staging in between.** A code deploy does not by itself turn on a
+   currently-off strategy (that's `EXECUTION_ENABLED`, rule 3, still
+   human-run), but it CAN change what an already-on one does. This makes the
+   unanimous-critic gate the only check standing between a change and real
+   money for anything touching entry-execution logic — which is exactly why
+   the second-critic requirement above for live-exposed strategies is not
+   optional. A rejected thesis (any critic objects) is never pushed
+   anywhere — only logged.
 5. **A strategy's `EXECUTION_ENABLED`-style flags live in Heroku config,
    not in git** — you cannot see or change their current live values from
    here. Never assume a strategy is (or isn't) currently live-trading based
@@ -279,16 +301,18 @@ For each of the three strategies, the **proposer** agent:
    Each critic posts their own `type: "grade"` entry (same `debateId`) with
    `approve`/`reject` and reasoning.
 
-6. **If every critic approves:** commit and push directly to `main`. Call
-   `mcp__Quant__promotion_gate_evaluate` (a brand-new proposal will almost
-   always fail on `shadowDays` — that's correct, not a bug). Log a final `type:
-   "proposal"` entry — **with the SAME `debateId` as your original proposal
-   entry, passed explicitly** (omitting it here would mint a brand-new
-   `debateId` for what is actually a follow-up, silently splitting one debate
-   into two) — noting the change is now on `main` and what a human needs to
-   do next (deploy it themselves in **practice mode**,
-   `ACCOUNT_MODE=practice`, to start accumulating shadow days — you cannot
-   deploy anything yourself).
+6. **If every critic approves:** commit, push to `origin main`, then push to
+   `heroku main` (see rule 3 — this deploys the code; it does not enable
+   live trading). Call `mcp__Quant__promotion_gate_evaluate` (a brand-new
+   proposal will almost always fail on `shadowDays` — that's correct, not a
+   bug). Log a final `type: "proposal"` entry — **with the SAME `debateId` as
+   your original proposal entry, passed explicitly** (omitting it here would
+   mint a brand-new `debateId` for what is actually a follow-up, silently
+   splitting one debate into two) — noting the change is deployed and that
+   shadow-day accumulation starts now; whether it's trading in practice mode
+   or is already live depends on that strategy's current
+   `EXECUTION_ENABLED`/`ACCOUNT_MODE` config, which you cannot see or change
+   (rule 5) — do not assume either way.
 
 7. **If any critic rejects:** the proposer gets ONE revision attempt in the
    SAME run before giving up — do not push anything in the meantime.
