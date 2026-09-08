@@ -4,11 +4,11 @@ import { describePromotionAction, executePromotionAction } from '../src/engine/p
 
 async function withMockedFetch(response, fn) {
   const originalFetch = global.fetch;
-  const originalKey = process.env.HEROKU_PLATFORM_API_KEY;
-  process.env.HEROKU_PLATFORM_API_KEY = 'test-key';
+  const originalKey = process.env.PROMOTION_GATE_API_KEY;
+  process.env.PROMOTION_GATE_API_KEY = 'test-key';
   global.fetch = async () => response;
   try { await fn(); }
-  finally { global.fetch = originalFetch; process.env.HEROKU_PLATFORM_API_KEY = originalKey; }
+  finally { global.fetch = originalFetch; process.env.PROMOTION_GATE_API_KEY = originalKey; }
 }
 
 test('describePromotionAction: unknown strategy produces no action', () => {
@@ -56,13 +56,13 @@ test('executePromotionAction: an unapproved gate result executes nothing', async
   assert.equal(result.executed, false);
 });
 
-test('executePromotionAction: throws if HEROKU_PLATFORM_API_KEY is unset', async () => {
-  const originalKey = process.env.HEROKU_PLATFORM_API_KEY;
-  delete process.env.HEROKU_PLATFORM_API_KEY;
+test('executePromotionAction: throws if PROMOTION_GATE_API_KEY is unset', async () => {
+  const originalKey = process.env.PROMOTION_GATE_API_KEY;
+  delete process.env.PROMOTION_GATE_API_KEY;
   try {
     await assert.rejects(() => executePromotionAction('gap-continuation', { approved: true }));
   } finally {
-    process.env.HEROKU_PLATFORM_API_KEY = originalKey;
+    process.env.PROMOTION_GATE_API_KEY = originalKey;
   }
 });
 

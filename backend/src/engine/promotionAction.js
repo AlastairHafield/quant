@@ -3,7 +3,7 @@
 // describePromotionAction() only DESCRIBES the action (dry-run / display
 // use — e.g. the agent-harness's audit-log entries still show the human-
 // readable command). executePromotionAction() actually performs it via the
-// Heroku Platform API, authenticated with HEROKU_PLATFORM_API_KEY — a
+// Heroku Platform API, authenticated with PROMOTION_GATE_API_KEY — a
 // credential that lives only in this backend's own Heroku config vars and
 // is never exposed to the agent-harness's cloud sandbox. See
 // agent-harness/PROTOCOL.md daily-loop step 8: the agent calls this
@@ -49,7 +49,7 @@ export function describePromotionAction(strategy, gateResult) {
 // Actually flips the strategy live by PATCHing the Heroku config var via the
 // Platform API. Returns the same shape describePromotionAction does, plus
 // `executed: true/false` and (on success) the Heroku API's response data.
-// Throws only on a missing HEROKU_PLATFORM_API_KEY or a strategy/gate
+// Throws only on a missing PROMOTION_GATE_API_KEY or a strategy/gate
 // mismatch — an HTTP failure from Heroku itself is returned as
 // `{ ...describeResult, executed: false, error }`, not thrown, so a caller
 // logging an audit entry always has a real result to log even when Heroku
@@ -59,9 +59,9 @@ export async function executePromotionAction(strategy, gateResult) {
   if (described.action !== 'set_execution_enabled') {
     return { ...described, executed: false };
   }
-  const apiKey = process.env.HEROKU_PLATFORM_API_KEY;
+  const apiKey = process.env.PROMOTION_GATE_API_KEY;
   if (!apiKey) {
-    throw new Error('HEROKU_PLATFORM_API_KEY is not set — cannot execute a promotion action.');
+    throw new Error('PROMOTION_GATE_API_KEY is not set — cannot execute a promotion action.');
   }
   const res = await fetch(`https://api.heroku.com/apps/${HEROKU_APP}/config-vars`, {
     method: 'PATCH',
