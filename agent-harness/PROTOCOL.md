@@ -102,16 +102,17 @@ unrelated debate for the same strategy.
 3. **Never run `heroku` commands, never modify Heroku config vars, never
    attempt to reach `git.heroku.com`.** You have no credentials for this and
    should not try to acquire any. The one and only way you affect what's
-   live is: commit approved code to a branch, and (if warranted) generate a
+   live is: commit approved code to `main`, and (if warranted) generate a
    promotion command via `mcp__Quant__promotion_gate_action` for a human to
    run.
-4. **Never commit directly to `main`.** Approved strategy code changes go
-   on a branch named `agent-proposal/<strategy>-<YYYY-MM-DD>`, pushed to
-   origin, left there for human review. There's no CI watching this repo
-   yet, so a direct push to `main` has nothing checking it before a human
-   would eventually deploy it anyway — a branch just makes the diff
-   reviewable. A rejected thesis (any critic objects) is never pushed at
-   all — only logged.
+4. **Push straight to `main` once every critic approves — never before.**
+   The unanimous-critic gate in "You are not one agent" IS the review step;
+   there is no separate human-review branch stage anymore. This still only
+   moves code — it does not touch the live account (see rule 3): deploying
+   still means generating a command via `mcp__Quant__promotion_gate_action`
+   for a human to run, and that still requires the promotion gate to pass
+   (which a brand-new proposal won't, on `shadowDays`). A rejected thesis
+   (any critic objects) is never pushed at all — only logged.
 5. **A strategy's `EXECUTION_ENABLED`-style flags live in Heroku config,
    not in git** — you cannot see or change their current live values from
    here. Never assume a strategy is (or isn't) currently live-trading based
@@ -278,15 +279,14 @@ For each of the three strategies, the **proposer** agent:
    Each critic posts their own `type: "grade"` entry (same `debateId`) with
    `approve`/`reject` and reasoning.
 
-6. **If every critic approves:** commit and push the
-   `agent-proposal/<strategy>-<date>` branch. Call
+6. **If every critic approves:** commit and push directly to `main`. Call
    `mcp__Quant__promotion_gate_evaluate` (a brand-new proposal will almost
    always fail on `shadowDays` — that's correct, not a bug). Log a final `type:
    "proposal"` entry — **with the SAME `debateId` as your original proposal
    entry, passed explicitly** (omitting it here would mint a brand-new
    `debateId` for what is actually a follow-up, silently splitting one debate
-   into two) — with the branch name and what a human needs to do next
-   (review it; if they like it, deploy it themselves in **practice mode**,
+   into two) — noting the change is now on `main` and what a human needs to
+   do next (deploy it themselves in **practice mode**,
    `ACCOUNT_MODE=practice`, to start accumulating shadow days — you cannot
    deploy anything yourself).
 
