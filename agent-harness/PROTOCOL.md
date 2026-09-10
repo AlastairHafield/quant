@@ -273,6 +273,21 @@ numbers mean.
 
 ## Daily loop
 
+0. **Sync git state before doing anything else.** `git fetch origin` (and
+   `git fetch heroku` if you'll be deploying this run) before you compare
+   HEAD to `origin/main`, check whether anything looks "unpushed," or decide
+   commits are "dangling." A cached/stale remote-tracking ref is
+   indistinguishable from real unpushed history and will produce a false
+   positive that looks identical to actual tampering. And once you've
+   fetched fresh: remember you have **zero memory of previous runs** (this
+   doc's opening line) — a prior run's proposer already pushes straight to
+   `origin main` itself once its critics approve (step 6 below), so finding
+   commits on a freshly-fetched `origin/main` that you don't personally
+   recall making is this pipeline working as designed, not evidence of
+   tampering. If, after fetching fresh, HEAD still doesn't match
+   `origin/main`, that's real signal worth a `type: "error"` entry — just
+   never conclude that from an unfetched ref.
+
 For each of the three strategies, the **proposer** agent:
 
 1. **Pulls recent performance.** `mcp__Quant__ledger_daily` for each of the
