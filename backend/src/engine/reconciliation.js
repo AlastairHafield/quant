@@ -4,17 +4,15 @@
 // (from tradeJournalMongo.js's unified ledger) against what a backtest of
 // its CURRENT live configuration would have predicted over that same window.
 //
-// Deliberately does NOT try to auto-map a live bot's config.js onto a
-// backtest engine's own param names here — that mapping is specific to each
-// strategy (see each bot's own config.js comments for what was actually
-// validated, e.g. mechanical-orb's orb-alpaca-1m-findings /
-// gap-continuation's gap-fill-findings memory references) and getting it
-// silently wrong here would produce a confidently-wrong drift report, worse
-// than having none. Call the matching backtest engine (orbBacktest.js for
-// mechanical-orb, gapFillBacktest.js for gap-continuation) yourself with the
-// live bot's actual parameters over the same date range, and pass its
-// `metrics.full` (or `.oos`) straight in as backtestStats — the field names
-// below (winRate, expectancy) are exactly computeBacktestMetrics's own.
+// Deliberately does NOT try to auto-map the live bot's config.js onto the
+// backtest engine's own param names here — that mapping is strategy-specific
+// (see gex-breakout/src/config.js's own comments for what was actually
+// validated) and getting it silently wrong here would produce a
+// confidently-wrong drift report, worse than having none. Call the matching
+// backtest engine (orderFlowBacktest.js) yourself with the live bot's actual
+// parameters over the same date range, and pass its `metrics.full` (or
+// `.oos`) straight in as backtestStats — the field names below (winRate,
+// expectancy) are exactly computeBacktestMetrics's own.
 
 function round2(n) {
   return Math.round(n * 100) / 100;
@@ -80,9 +78,9 @@ export function computeLiveVsBacktestDrift(liveStats, backtestStats, tolerances 
 // promotionGate.js needs one { dayKey, drift } per consecutive practice-
 // account trading day. The naive reading — compare THAT day's own trades
 // against the backtest — silently defeats the whole check for a low-
-// frequency strategy: gap-continuation and mechanical-orb each trade only a
-// handful of times a MONTH, so a single day almost never reaches
-// computeLiveVsBacktestDrift's default minLiveTrades:5, and an
+// frequency strategy: this strategy trades only a handful of times a MONTH,
+// so a single day almost never reaches computeLiveVsBacktestDrift's default
+// minLiveTrades:5, and an
 // always-"not comparable" day never counts as drift. The gate would then
 // approve promotion having never actually been able to check for drift —
 // not because the strategy passed, but because it was never really tested.

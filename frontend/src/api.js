@@ -24,20 +24,15 @@ export const getMRRuns = () => api.get('/mr/backtest/runs').then(r => r.data);
 export const getMRTrades = (id) => api.get(`/mr/backtest/runs/${id}/trades`).then(r => r.data);
 export const getMRSweep = (sweepId) => api.get(`/mr/sweeps/${sweepId}`).then(r => r.data);
 
-export const runORBBacktest = (body) => api.post('/orb/backtest/run', body).then(r => r.data);
-export const runORBSweep = (body) => api.post('/orb/sweep/run', body).then(r => r.data);
-export const getORBRuns = () => api.get('/orb/backtest/runs').then(r => r.data);
-export const getORBTrades = (id) => api.get(`/orb/backtest/runs/${id}/trades`).then(r => r.data);
-
 // gex-breakout worker runs as a separate Heroku dyno with no public routing of its
 // own, so it pushes its status to the backend and we read it back from there.
 export const getGexBreakoutStatus = () => api.get('/gex-breakout/status').then(r => r.data);
-export const getMechanicalOrbStatus = () => api.get('/mechanical-orb/status').then(r => r.data);
-export const getGapContinuationStatus = () => api.get('/gap-continuation/status').then(r => r.data);
-export const getORBSweep = (sweepId) => api.get(`/orb/sweeps/${sweepId}`).then(r => r.data);
 
 export const getTradeJournalTrades = (params) => api.get('/trade-journal/trades', { params }).then(r => r.data);
 export const getTradeJournalExitActions = (params) => api.get('/trade-journal/exit-actions', { params }).then(r => r.data);
 export const getTradeJournalDailySummaries = () => api.get('/trade-journal/daily-summaries').then(r => r.data);
 
 export const getAgentHarnessAuditLog = (params) => api.get('/agent-harness/audit-log', { params }).then(r => r.data);
+
+export const submitAgentHarnessSuggestion = (text) => api.post('/agent-harness/suggestions', { text }).then(r => r.data);
+export const getAgentHarnessSuggestions = (params) => api.get('/agent-harness/suggestions', { params }).then(r => r.data);

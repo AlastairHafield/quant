@@ -1,19 +1,16 @@
 import React, { useState } from 'react';
 import GexBreakoutDashboard from './GexBreakoutDashboard';
-import MechanicalOrbDashboard from './MechanicalOrbDashboard';
-import GapContinuationDashboard from './GapContinuationDashboard';
 import TradeJournal from './TradeJournal';
 import PracticeMode from './PracticeMode';
 import StrategyConfig from './StrategyConfig';
 import AgentHarnessDashboard from './AgentHarnessDashboard';
 
-// The three real, live-money strategies come first, each with its own tab —
-// whatever trades a practice account (currently just GEX Breakout's Strategy
-// A) lives only in Practice Mode, never mixed into these.
+// gap-continuation and mechanical-orb (the two other bots that used to run
+// here, both trading the real Combine) were decommissioned 2026-09-19 — all
+// focus is now on the Order Flow Bot, which trades only its own practice
+// account (see Practice Mode).
 const STRATS = [
   { id: 'gex', label: 'GEX Breakout', icon: '⬤', Component: GexBreakoutDashboard },
-  { id: 'morb', label: 'Mechanical ORB', icon: '⬤', Component: MechanicalOrbDashboard },
-  { id: 'gapc', label: 'Gap Continuation', icon: '⬤', Component: GapContinuationDashboard },
   { id: 'practice', label: 'Practice Mode', icon: '🧪', Component: PracticeMode },
   { id: 'config', label: 'Strategy Config', icon: '⚙', Component: StrategyConfig },
   { id: 'journal', label: 'Trade Journal', icon: '📓', Component: TradeJournal },

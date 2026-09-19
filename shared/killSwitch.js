@@ -1,7 +1,7 @@
 import { MongoClient } from "mongodb";
 
-// One global switch shared by every worker (gap-continuation, mechanical-orb,
-// gex-breakout) regardless of which account/role it trades — a human flips
+// One global switch for the worker bot (gex-breakout) regardless of which
+// account/role it trades — a human flips
 // this to instantly halt all live entries everywhere, independent of any
 // bot's own EXECUTION_ENABLED flag, so it can't be un-tripped by an
 // agent-authored config change the way EXECUTION_ENABLED could be. Lives in

@@ -7,8 +7,6 @@ import SDZones from './pages/SDZones';
 import SDResults from './pages/SDResults';
 import MRLab from './pages/MRLab';
 import MRResults from './pages/MRResults';
-import ORBLab from './pages/ORBLab';
-import ORBResults from './pages/ORBResults';
 import LiveDashboard from './pages/LiveDashboard';
 import './App.css';
 
@@ -29,11 +27,6 @@ const MR_TABS = [
   { id: 'mr-results', label: 'MR Results', icon: '◉' },
 ];
 
-const ORB_TABS = [
-  { id: 'orb-lab',     label: 'ORB Lab',     icon: '⌁' },
-  { id: 'orb-results', label: 'ORB Results', icon: '◉' },
-];
-
 const LIVE_TABS = [
   { id: 'live', label: 'Live Dashboard', icon: '⬤' },
 ];
@@ -43,7 +36,6 @@ const GROUPS = [
   { name: 'PEAD',      tabs: PEAD_TABS },
   { name: 'S&D',       tabs: SD_TABS },
   { name: 'MEAN REV',  tabs: MR_TABS },
-  { name: 'ORB',       tabs: ORB_TABS },
 ];
 
 const BUILD = 'v1.3';
@@ -55,8 +47,6 @@ export default function App() {
   const [lastSDRunId, setLastSD]  = useState(null);
   const [lastMRRunId, setLastMR]  = useState(null);
   const [lastMRSweep, setLastMRSweep] = useState(null);
-  const [lastORBRunId, setLastORB] = useState(null);
-  const [lastORBSweep, setLastORBSweep] = useState(null);
 
   function selectTab(id) {
     setTab(id);
@@ -120,13 +110,6 @@ export default function App() {
           />
         )}
         {tab === 'mr-results' && <MRResults initialRunId={lastMRRunId} initialSweepId={lastMRSweep} />}
-        {tab === 'orb-lab'     && (
-          <ORBLab
-            onRunComplete={(id) => { setLastORB(id); setLastORBSweep(null); selectTab('orb-results'); }}
-            onSweepComplete={(sweepId) => { setLastORBSweep(sweepId); setLastORB(null); selectTab('orb-results'); }}
-          />
-        )}
-        {tab === 'orb-results' && <ORBResults initialRunId={lastORBRunId} initialSweepId={lastORBSweep} />}
         {tab === 'live' && <LiveDashboard />}
       </main>
     </div>

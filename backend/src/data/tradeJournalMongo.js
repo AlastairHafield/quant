@@ -1,12 +1,12 @@
 import { MongoClient } from 'mongodb';
 
-// Read-only access to the trade journals gex-breakout/mechanical-orb/gap-
-// continuation each write to their own Mongo database (see each strategy's
-// own tradeJournal.js — trades/signals/exitActions/dailySummaries). Same
-// MONGODB_URI as all three bots — Heroku config vars are already shared
-// app-wide, and this only ever reads.
+// Read-only access to the trade journal gex-breakout writes to its own Mongo
+// database (see its own tradeJournal.js —
+// trades/signals/exitActions/dailySummaries). Same MONGODB_URI as the bot's
+// own .env — Heroku config vars are already shared app-wide, and this only
+// ever reads.
 
-const STRATEGY_DBS = ['gex_breakout', 'mechanical_orb', 'gap_continuation'];
+const STRATEGY_DBS = ['gex_breakout'];
 
 let client = null;
 let clientPromise = null;

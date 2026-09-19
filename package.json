@@ -9,7 +9,7 @@
   "scripts": {
     "start": "node backend/src/index.js",
     "test": "node --test shared/test",
-    "heroku-postbuild": "npm install --prefix backend && npm install --prefix frontend && npm run build --prefix frontend && npm install --prefix gex-breakout && npm install --prefix mechanical-orb && npm install --prefix gap-continuation"
+    "heroku-postbuild": "npm install --prefix backend && npm install --prefix frontend && npm run build --prefix frontend && npm install --prefix gex-breakout"
   },
   "dependencies": {
     "mongodb": "^7.5.0"

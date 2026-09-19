@@ -4,20 +4,17 @@ import { loadEarningsAndSignals } from '../engine/signals.js';
 import { runBacktest } from '../engine/backtest.js';
 import { runSDBacktest } from '../engine/sdBacktest.js';
 import { runMRBacktest, runMRSweep } from '../engine/mrBacktest.js';
-import { runORBBacktest, runORBSweep, runORBWalkForward } from '../engine/orbBacktest.js';
-import { runGapFillBacktest, runGapFillSweep, runGapFillWalkForward } from '../engine/gapFillBacktest.js';
 import { runOrderFlowBacktest } from '../engine/orderFlowBacktest.js';
 import { upsertTickVolume1m } from '../data/tickVolumeMongo.js';
 import { parsePineScriptParams } from '../engine/parsePineScript.js';
-import { getBacktestRuns, getBacktestTrades, getEarningsEvents, removeStock, getSDRuns, getSDTrades, getMRRuns, getMRRun, getMRTrades, getMRSweep, getORBRuns, getORBRun, getORBTrades, getORBSweep, getGapFillRuns, getGapFillRun, getGapFillTrades, getGapFillSweep } from '../data/db.js';
+import { getBacktestRuns, getBacktestTrades, getEarningsEvents, removeStock, getSDRuns, getSDTrades, getMRRuns, getMRRun, getMRTrades, getMRSweep } from '../data/db.js';
 import { setGexBreakoutStatus, getGexBreakoutStatus } from '../data/gexBreakoutStatus.js';
-import { setMechanicalOrbStatus, getMechanicalOrbStatus } from '../data/mechanicalOrbStatus.js';
-import { setGapContinuationStatus, getGapContinuationStatus } from '../data/gapContinuationStatus.js';
 import { fetchTrades, fetchExitActions, fetchDailySummaries, fetchLedgerTrades, fetchDailyLedger } from '../data/tradeJournalMongo.js';
 import { summarizeLiveTrades, computeLiveVsBacktestDrift, groupTradesByDay, buildShadowDayReports } from '../engine/reconciliation.js';
 import { evaluatePromotionGate } from '../engine/promotionGate.js';
 import { describePromotionAction } from '../engine/promotionAction.js';
 import { logAuditEntry, fetchAuditLog } from '../data/agentAuditLog.js';
+import { submitSuggestion, fetchSuggestions } from '../data/agentSuggestions.js';
 
 const router = express.Router();
 
@@ -266,182 +263,6 @@ router.get('/mr/sweeps/:sweepId', (req, res) => {
   }
 });
 
-// === OPENING-RANGE BREAKOUT BACKTEST ===
-
-router.post('/orb/backtest/run', async (req, res) => {
-  const { symbol, dateFrom, dateTo, ...params } = req.body;
-  if (!symbol || !dateFrom || !dateTo) {
-    return res.status(400).json({ success: false, error: 'symbol, dateFrom, and dateTo are required' });
-  }
-  try {
-    const result = await runORBBacktest(symbol.toUpperCase(), dateFrom, dateTo, {
-      ...params,
-      apiKey: process.env.FMP_API_KEY || null,
-    });
-    if (result.error) return res.json({ success: false, error: result.error });
-    res.json({ success: true, data: result });
-  } catch (e) {
-    console.error('ORB backtest failed:', e);
-    res.status(500).json({ success: false, error: e.message });
-  }
-});
-
-router.post('/orb/sweep/run', async (req, res) => {
-  const { symbol, dateFrom, dateTo, baseParams, grid } = req.body;
-  if (!symbol || !dateFrom || !dateTo) {
-    return res.status(400).json({ success: false, error: 'symbol, dateFrom, and dateTo are required' });
-  }
-  try {
-    const result = await runORBSweep(symbol.toUpperCase(), dateFrom, dateTo, {
-      ...(baseParams || {}),
-      apiKey: process.env.FMP_API_KEY || null,
-    }, grid || {});
-    if (result.error) return res.json({ success: false, error: result.error });
-    res.json({ success: true, data: result });
-  } catch (e) {
-    console.error('ORB sweep failed:', e);
-    res.status(500).json({ success: false, error: e.message });
-  }
-});
-
-router.get('/orb/backtest/runs', (req, res) => {
-  try {
-    res.json({ success: true, data: getORBRuns() });
-  } catch (e) {
-    res.status(500).json({ success: false, error: e.message });
-  }
-});
-
-router.get('/orb/backtest/runs/:id', (req, res) => {
-  try {
-    res.json({ success: true, data: getORBRun(parseInt(req.params.id)) });
-  } catch (e) {
-    res.status(500).json({ success: false, error: e.message });
-  }
-});
-
-router.get('/orb/backtest/runs/:id/trades', (req, res) => {
-  try {
-    res.json({ success: true, data: getORBTrades(parseInt(req.params.id)) });
-  } catch (e) {
-    res.status(500).json({ success: false, error: e.message });
-  }
-});
-
-router.get('/orb/sweeps/:sweepId', (req, res) => {
-  try {
-    res.json({ success: true, data: getORBSweep(req.params.sweepId) });
-  } catch (e) {
-    res.status(500).json({ success: false, error: e.message });
-  }
-});
-
-router.post('/orb/walkforward/run', async (req, res) => {
-  const { symbol, dateFrom, dateTo, baseParams, grid, numFolds } = req.body;
-  if (!symbol || !dateFrom || !dateTo) {
-    return res.status(400).json({ success: false, error: 'symbol, dateFrom, and dateTo are required' });
-  }
-  try {
-    const result = await runORBWalkForward(symbol.toUpperCase(), dateFrom, dateTo, {
-      ...(baseParams || {}),
-      apiKey: process.env.FMP_API_KEY || null,
-    }, grid || {}, numFolds || 4);
-    if (result.error) return res.json({ success: false, error: result.error });
-    res.json({ success: true, data: result });
-  } catch (e) {
-    console.error('ORB walk-forward failed:', e);
-    res.status(500).json({ success: false, error: e.message });
-  }
-});
-
-// === GAP FILL / OVERNIGHT GAP BACKTEST (same shape as ORB above) ===
-
-router.post('/gapfill/backtest/run', async (req, res) => {
-  const { symbol, dateFrom, dateTo, ...params } = req.body;
-  if (!symbol || !dateFrom || !dateTo) {
-    return res.status(400).json({ success: false, error: 'symbol, dateFrom, and dateTo are required' });
-  }
-  try {
-    const result = await runGapFillBacktest(symbol.toUpperCase(), dateFrom, dateTo, {
-      ...params,
-      apiKey: process.env.FMP_API_KEY || null,
-    });
-    if (result.error) return res.json({ success: false, error: result.error });
-    res.json({ success: true, data: result });
-  } catch (e) {
-    console.error('Gap-fill backtest failed:', e);
-    res.status(500).json({ success: false, error: e.message });
-  }
-});
-
-router.post('/gapfill/sweep/run', async (req, res) => {
-  const { symbol, dateFrom, dateTo, baseParams, grid } = req.body;
-  if (!symbol || !dateFrom || !dateTo) {
-    return res.status(400).json({ success: false, error: 'symbol, dateFrom, and dateTo are required' });
-  }
-  try {
-    const result = await runGapFillSweep(symbol.toUpperCase(), dateFrom, dateTo, {
-      ...(baseParams || {}),
-      apiKey: process.env.FMP_API_KEY || null,
-    }, grid || {});
-    if (result.error) return res.json({ success: false, error: result.error });
-    res.json({ success: true, data: result });
-  } catch (e) {
-    console.error('Gap-fill sweep failed:', e);
-    res.status(500).json({ success: false, error: e.message });
-  }
-});
-
-router.post('/gapfill/walkforward/run', async (req, res) => {
-  const { symbol, dateFrom, dateTo, baseParams, grid, numFolds } = req.body;
-  if (!symbol || !dateFrom || !dateTo) {
-    return res.status(400).json({ success: false, error: 'symbol, dateFrom, and dateTo are required' });
-  }
-  try {
-    const result = await runGapFillWalkForward(symbol.toUpperCase(), dateFrom, dateTo, {
-      ...(baseParams || {}),
-      apiKey: process.env.FMP_API_KEY || null,
-    }, grid || {}, numFolds || 4);
-    if (result.error) return res.json({ success: false, error: result.error });
-    res.json({ success: true, data: result });
-  } catch (e) {
-    console.error('Gap-fill walk-forward failed:', e);
-    res.status(500).json({ success: false, error: e.message });
-  }
-});
-
-router.get('/gapfill/backtest/runs', (req, res) => {
-  try {
-    res.json({ success: true, data: getGapFillRuns() });
-  } catch (e) {
-    res.status(500).json({ success: false, error: e.message });
-  }
-});
-
-router.get('/gapfill/backtest/runs/:id', (req, res) => {
-  try {
-    res.json({ success: true, data: getGapFillRun(parseInt(req.params.id)) });
-  } catch (e) {
-    res.status(500).json({ success: false, error: e.message });
-  }
-});
-
-router.get('/gapfill/backtest/runs/:id/trades', (req, res) => {
-  try {
-    res.json({ success: true, data: getGapFillTrades(parseInt(req.params.id)) });
-  } catch (e) {
-    res.status(500).json({ success: false, error: e.message });
-  }
-});
-
-router.get('/gapfill/sweeps/:sweepId', (req, res) => {
-  try {
-    res.json({ success: true, data: getGapFillSweep(req.params.sweepId) });
-  } catch (e) {
-    res.status(500).json({ success: false, error: e.message });
-  }
-});
-
 // === ORDER FLOW BOT BACKTEST (gex-breakout's "OF") ===
 // Reuses gex-breakout's own live decision code directly (see
 // orderFlowBacktest.js's header) rather than a reimplementation — deliberately
@@ -521,40 +342,6 @@ router.get('/gex-breakout/status', (req, res) => {
   res.json({ success: true, data: status });
 });
 
-// === MECHANICAL ORB (same relay pattern as GEX Breakout above) ===
-
-router.post('/mechanical-orb/status', (req, res) => {
-  const expected = process.env.MECHANICAL_ORB_STATUS_SECRET;
-  if (expected && req.headers['x-status-secret'] !== expected) {
-    return res.status(401).json({ success: false, error: 'invalid status secret' });
-  }
-  setMechanicalOrbStatus(req.body);
-  res.json({ success: true });
-});
-
-router.get('/mechanical-orb/status', (req, res) => {
-  const status = getMechanicalOrbStatus();
-  if (!status) return res.status(404).json({ success: false, error: 'no status reported yet' });
-  res.json({ success: true, data: status });
-});
-
-// === GAP CONTINUATION (same relay pattern as GEX Breakout/Mechanical ORB above) ===
-
-router.post('/gap-continuation/status', (req, res) => {
-  const expected = process.env.GAP_CONTINUATION_STATUS_SECRET;
-  if (expected && req.headers['x-status-secret'] !== expected) {
-    return res.status(401).json({ success: false, error: 'invalid status secret' });
-  }
-  setGapContinuationStatus(req.body);
-  res.json({ success: true });
-});
-
-router.get('/gap-continuation/status', (req, res) => {
-  const status = getGapContinuationStatus();
-  if (!status) return res.status(404).json({ success: false, error: 'no status reported yet' });
-  res.json({ success: true, data: status });
-});
-
 // === TRADE JOURNAL (read-only, backed by gex-breakout's Mongo trade journal) ===
 
 router.get('/trade-journal/trades', async (req, res) => {
@@ -618,9 +405,9 @@ router.get('/ledger/daily', async (req, res) => {
 // here — see reconciliation.js's own comment on why auto-mapping a live
 // bot's config onto a backtest engine's params is left to a human/agent who
 // knows the intended mapping, not guessed at in this endpoint. Call
-// /orb/backtest/run or /gapfill/backtest/run yourself over the same date
-// range with the live bot's real parameters, then pass its
-// data.metrics.full (or .oos) straight through as backtestStats.
+// `mcp__Quant__orderflow_backtest_run` yourself over the same date range
+// with the live bot's real parameters, then pass its data.metrics.full (or
+// .oos) straight through as backtestStats.
 router.post('/reconciliation/run', async (req, res) => {
   const { system, closedFrom, closedTo, backtestStats, tolerances } = req.body;
   if (!system || !closedFrom || !closedTo || !backtestStats) {
@@ -711,6 +498,30 @@ router.get('/agent-harness/audit-log', async (req, res) => {
       limit: req.query.limit ? parseInt(req.query.limit) : undefined,
     });
     res.json({ success: true, data: entries });
+  } catch (e) {
+    res.status(500).json({ success: false, error: e.message });
+  }
+});
+
+// === AGENT HARNESS SUGGESTIONS (a free-text box for the user to steer the
+// next scheduled run — see agentSuggestions.js) ===
+
+router.post('/agent-harness/suggestions', async (req, res) => {
+  try {
+    const suggestion = await submitSuggestion(req.body?.text);
+    res.json({ success: true, data: suggestion });
+  } catch (e) {
+    res.status(400).json({ success: false, error: e.message });
+  }
+});
+
+router.get('/agent-harness/suggestions', async (req, res) => {
+  try {
+    const suggestions = await fetchSuggestions({
+      status: req.query.status || undefined,
+      limit: req.query.limit ? parseInt(req.query.limit) : undefined,
+    });
+    res.json({ success: true, data: suggestions });
   } catch (e) {
     res.status(500).json({ success: false, error: e.message });
   }

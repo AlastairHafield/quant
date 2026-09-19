@@ -1,67 +1,30 @@
 import React from 'react';
 
-// Reference snapshot of each live strategy's actual config.js — NOT pulled
-// live from each bot (only GEX Breakout pushes a status payload the frontend
-// can read; Mechanical ORB and Gap Continuation don't currently expose their
-// config over the wire). Update this whenever a bot's config.js changes.
-const AS_OF = '2026-07-30';
+// Reference snapshot of the live strategy's actual config.js — NOT pulled
+// live from the bot. Update this whenever gex-breakout's config.js changes.
+//
+// 2026-09-19: gap-continuation and mechanical-orb (both trading the real
+// Combine) were decommissioned; their entries were removed from this page.
+// The stale "Strategy B — General level breakout" entry was also removed —
+// that code path was already deleted from gex-breakout/src/worker.js before
+// this cleanup (see its own "Strategy B... was removed with GEX/FlashAlpha"
+// comment), so the Order Flow Bot is the only strategy this bot runs.
+const AS_OF = '2026-09-19';
 
 const STRATEGIES = [
   {
     id: 'gex-of',
     system: 'GEX Breakout',
-    strategy: 'Order Flow Bot (replaces the old Strategy A / 15-min ORB)',
-    account: 'Practice (own account, separate from Strategy B)',
+    strategy: 'Order Flow Bot',
+    account: 'Practice (own account)',
     instrument: 'MES',
     timeframe: 'Regime-adaptive — GEX bias picks trend-following vs. mean-reversion each day, no fixed window',
     entryWindow: 'No new entries after 12:00 ET · force-flat 15:55 ET',
-    entry: 'Regime picks the active zone set — footprint stacked buy/sell-imbalance zones on NEG_GAMMA (trend) days, session value area on POS_GAMMA (mean-reversion) days. 3 shared triggers evaluated against it: absorption at the zone edge, path-of-least-resistance (light-volume clean advance), lack-of-participation (declining volume + flattening delta) — plus failed-auction (POS_GAMMA-only, value-area probe-and-revert). Wall-proximity filter applies once a trigger fires. Signal-only (STRATEGY_OF_EXECUTION_ENABLED=false) — observing real signals/vetoes before enabling live orders',
+    entry: 'Regime picks the active zone set — footprint stacked buy/sell-imbalance zones on NEG_GAMMA (trend) days, session value area on POS_GAMMA (mean-reversion) days. 3 shared triggers evaluated against it: absorption at the zone edge, path-of-least-resistance (light-volume clean advance), lack-of-participation (declining volume + flattening delta) — plus failed-auction (POS_GAMMA-only, value-area probe-and-revert). Wall-proximity filter applies once a trigger fires.',
     stopTarget: 'Stop sits 1pt beyond the zone edge traded, capped at 12pt total risk · trend days trail behind the nearest zone instead of a fixed target · mean-reversion days target the opposite value-area edge',
-    sizing: 'Base 2 contracts (fixed synthetic grade — no confirmation-strength grading like Strategy B\'s flow grade yet) × wall-proximity multiplier — flat (ladder not applied on practice account)',
+    sizing: 'Base 2 contracts (fixed synthetic grade) × wall-proximity multiplier — flat (ladder not applied on practice account)',
     riskLimits: 'Max 3 trades/day, 60-min cooldown per zone, max 2 losses/day or 1 win halts the strategy for the day',
-    execEnvVar: 'STRATEGY_OF_EXECUTION_ENABLED',
-  },
-  {
-    id: 'gex-b',
-    system: 'GEX Breakout',
-    strategy: 'Strategy B — General level breakout',
-    account: 'Real Combine (50KTC) — shared with Mechanical ORB & Gap Continuation',
-    instrument: 'MES',
-    timeframe: 'No fixed window — evaluates GEX walls / flip point / daily levels / consolidation ranges continuously',
-    entryWindow: 'No new entries after 12:00 ET · force-flat 15:55 ET',
-    entry: 'Close beyond a trigger level (+1pt buffer), within-proximity + cooldown filters, order-flow grade required',
-    stopTarget: 'Set relative to the broken level; failed-breakout / delta-divergence / absorption / regime-flip dynamic exits',
-    sizing: 'Base 2 contracts × wall-proximity multiplier × equity ladder (1 base @ $50,000, +1 per $2,000 growth, capped 15x)',
-    riskLimits: 'Max 3 trades/day, 60-min cooldown per level, max 2 losses/day or 1 win halts the strategy for the day',
-    execEnvVar: 'EXECUTION_ENABLED (bot-wide)',
-  },
-  {
-    id: 'morb',
-    system: 'Mechanical ORB',
-    strategy: 'Opening range breakout',
-    account: 'Real Combine (50KTC) — shared with GEX Breakout B & Gap Continuation',
-    instrument: 'MES',
-    timeframe: '15-min opening range (09:30–09:45 ET)',
-    entryWindow: 'No new entries after 12:00 ET · force-flat 15:55 ET',
-    entry: 'LONG-only close beyond the OR high, prior-day ADX(14) ≥ 25 required to arm the day, one trade per day',
-    stopTarget: 'Stop = 1.5 × opening-range width · rides to stop or session end (no fixed take-profit)',
-    sizing: 'Flat 1 contract (ladder present in code but pinned off)',
-    riskLimits: 'One trade per day, no separate win/loss halt (single-shot by design)',
-    execEnvVar: 'MECHANICAL_ORB_EXECUTION_ENABLED',
-  },
-  {
-    id: 'gapc',
-    system: 'Gap Continuation',
-    strategy: 'RTH gap continuation',
-    account: 'Real Combine (50KTC) — shared with GEX Breakout B & Mechanical ORB',
-    instrument: 'MES',
-    timeframe: 'Evaluated once, at the first bar at/after the 09:30 ET open',
-    entryWindow: 'One evaluation per day, at session open · force-flat 15:55 ET',
-    entry: 'First RTH bar\'s open vs. prior RTH close ≥ 0.5% gap, direction follows the gap, prior-day ADX(14) ≥ 25 required',
-    stopTarget: 'Stop = 0.5 × gap size · target = 1.0 × stop distance (1:1 R:R) · fills at the first bar\'s close',
-    sizing: 'Flat 1 contract (ladder present in code but pinned off)',
-    riskLimits: 'One evaluation per day (taken or vetoed), no separate win/loss halt',
-    execEnvVar: 'GAP_CONTINUATION_EXECUTION_ENABLED',
+    execEnvVar: 'STRATEGY_OF_EXECUTION_ENABLED (also requires the bot-wide EXECUTION_ENABLED)',
   },
 ];
 
@@ -70,9 +33,9 @@ export default function StrategyConfig() {
     <div>
       <p className="page-title">Strategy Config</p>
       <div className="status" style={{ marginBottom: 16 }}>
-        Reference snapshot as of {AS_OF} — this is a manually-maintained mirror of each bot's config.js, not pulled
-        live. Live execution status/account balance/positions are on each bot's own dashboard tab (and Practice
-        Mode for the Order Flow Bot).
+        Reference snapshot as of {AS_OF} — this is a manually-maintained mirror of the bot's config.js, not pulled
+        live. Live execution status/account balance/positions are on the bot's own dashboard tab (and Practice
+        Mode).
       </div>
 
       {STRATEGIES.map((s) => (

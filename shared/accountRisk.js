@@ -1,8 +1,8 @@
-// Shared across all three TopstepX worker bots (gap-continuation, mechanical-orb,
-// gex-breakout) rather than duplicated per this codebase's usual self-contained-
-// module convention (see each bot's sizing.js/dataSources/topstepx.js) — risk
-// enforcement has to stay uniform across bots that share a real account, so
-// drift here is a hazard that convention doesn't apply to.
+// Used by gex-breakout's worker bot rather than duplicated per this
+// codebase's usual self-contained-module convention (see the bot's own
+// sizing.js/dataSources/topstepx.js) — risk enforcement has to stay uniform
+// and out of the config a strategy is actively iterating on, so drift here
+// is a hazard that convention doesn't apply to.
 
 // currentBalance/dayStartBalance come straight from the broker's own account
 // snapshot (already polled every few seconds by every worker), not from summing

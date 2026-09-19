@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useCallback } from 'react';
-import { getAgentHarnessAuditLog } from '../api';
+import { getAgentHarnessAuditLog, submitAgentHarnessSuggestion, getAgentHarnessSuggestions } from '../api';
 
 // The Phase 5 agent harness's own audit trail — what it watched, proposed,
 // graded, promoted, or demoted, and why. Entries with a shared debateId
@@ -21,7 +21,91 @@ const TYPE_COLOR_VAR = {
 
 const fmtTime = (iso) => (iso ? new Date(iso).toLocaleString('en-US', { hour12: false }) : '—');
 
-const STRATEGIES = ['', 'gap-continuation', 'mechanical-orb', 'gex-breakout'];
+const STRATEGIES = ['', 'gex-breakout'];
+
+// Free-text box so the user can steer the next scheduled run without
+// editing PROTOCOL.md or the code directly — see backend/src/data/
+// agentSuggestions.js and PROTOCOL.md's daily-loop step 0.5 (the routine
+// reads unread ones via mcp__Quant__suggestions_list at the start of every
+// run, then marks each one it actually acted on via suggestions_mark_read).
+function SuggestionBox() {
+  const [text, setText] = useState('');
+  const [suggestions, setSuggestions] = useState(null);
+  const [submitting, setSubmitting] = useState(false);
+  const [error, setError] = useState(null);
+
+  const load = useCallback(async () => {
+    try {
+      const res = await getAgentHarnessSuggestions({ limit: 20 });
+      setSuggestions(res.data);
+    } catch (err) {
+      setError(err.response?.data?.error || err.message);
+    }
+  }, []);
+
+  useEffect(() => {
+    load();
+  }, [load]);
+
+  async function handleSubmit(e) {
+    e.preventDefault();
+    if (!text.trim() || submitting) return;
+    setSubmitting(true);
+    setError(null);
+    try {
+      await submitAgentHarnessSuggestion(text);
+      setText('');
+      await load();
+    } catch (err) {
+      setError(err.response?.data?.error || err.message);
+    } finally {
+      setSubmitting(false);
+    }
+  }
+
+  return (
+    <div className="card" style={{ marginBottom: 16 }}>
+      <p className="card-title">Suggest something to the next run</p>
+      <form onSubmit={handleSubmit} style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+        <textarea
+          value={text}
+          onChange={(e) => setText(e.target.value)}
+          placeholder={'e.g. "Check whether the absorption trigger is too loose on trend days" or "Look at Tuesday\'s drift before proposing anything new"'}
+          rows={3}
+          style={{ fontFamily: 'var(--mono)', fontSize: 12, padding: 8, resize: 'vertical' }}
+        />
+        <div style={{ display: 'flex', gap: 10, alignItems: 'center' }}>
+          <button type="submit" className="btn btn-primary" disabled={!text.trim() || submitting}>
+            {submitting ? 'Sending…' : 'Send to agent harness'}
+          </button>
+          <span style={{ fontSize: 11, color: 'var(--text3)' }}>
+            Read by the next scheduled run — not answered here immediately.
+          </span>
+        </div>
+        {error && <div className="status error">{error}</div>}
+      </form>
+
+      {suggestions?.length > 0 && (
+        <div style={{ marginTop: 14, display: 'flex', flexDirection: 'column', gap: 6 }}>
+          {suggestions.map((s) => (
+            <div key={s._id} style={{ display: 'flex', gap: 8, alignItems: 'baseline', fontSize: 12 }}>
+              <span
+                style={{
+                  fontFamily: 'var(--mono)', fontSize: 10, textTransform: 'uppercase',
+                  color: s.status === 'new' ? 'var(--accent2)' : 'var(--text3)',
+                }}
+              >
+                {s.status}
+              </span>
+              <span style={{ color: 'var(--text3)', fontFamily: 'var(--mono)', fontSize: 11 }}>{fmtTime(s.createdAt)}</span>
+              <span>{s.text}</span>
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
 
 export default function AgentHarnessDashboard() {
   const [entries, setEntries] = useState(null);
@@ -46,6 +130,7 @@ export default function AgentHarnessDashboard() {
     return (
       <div>
         <p className="page-title">Agent Harness</p>
+        <SuggestionBox />
         <div className="status error">Failed to load: {error}</div>
       </div>
     );
@@ -55,6 +140,7 @@ export default function AgentHarnessDashboard() {
     return (
       <div>
         <p className="page-title">Agent Harness</p>
+        <SuggestionBox />
         <div className="empty"><span className="spinner" /> Loading...</div>
       </div>
     );
@@ -80,6 +166,8 @@ export default function AgentHarnessDashboard() {
   return (
     <div>
       <p className="page-title">Agent Harness — Debate Log</p>
+
+      <SuggestionBox />
 
       <div className="card" style={{ marginBottom: 16 }}>
         <div style={{ display: 'flex', gap: 10, alignItems: 'center', flexWrap: 'wrap' }}>

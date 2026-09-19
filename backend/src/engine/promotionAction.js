@@ -12,8 +12,6 @@
 // left in this path by design.
 
 const EXECUTION_ENV_VAR = {
-  'gap-continuation': 'GAP_CONTINUATION_EXECUTION_ENABLED',
-  'mechanical-orb': 'MECHANICAL_ORB_EXECUTION_ENABLED',
   // gex-breakout has two independent gates — the bot-wide switch plus the
   // Order Flow Bot's own separate one (see gex-breakout/src/config.js) —
   // promoting "gex-breakout" specifically means the Order Flow Bot's own

@@ -1,13 +1,12 @@
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { z } from 'zod';
-import { runORBBacktest, runORBWalkForward } from '../engine/orbBacktest.js';
-import { runGapFillBacktest, runGapFillWalkForward } from '../engine/gapFillBacktest.js';
 import { runOrderFlowBacktest } from '../engine/orderFlowBacktest.js';
 import { fetchLedgerTrades, fetchDailyLedger } from '../data/tradeJournalMongo.js';
 import { summarizeLiveTrades, computeLiveVsBacktestDrift, groupTradesByDay, buildShadowDayReports } from '../engine/reconciliation.js';
 import { evaluatePromotionGate } from '../engine/promotionGate.js';
 import { describePromotionAction, executePromotionAction } from '../engine/promotionAction.js';
 import { logAuditEntry, fetchAuditLog } from '../data/agentAuditLog.js';
+import { fetchSuggestions, markSuggestionRead } from '../data/agentSuggestions.js';
 
 // MCP front door onto this same backend, for the scheduled agent-harness
 // routine specifically — its cloud sandbox's network egress proxy only
@@ -41,7 +40,7 @@ export function createBackendMcpServer() {
 
   server.registerTool('ledger_daily', {
     title: 'Unified daily P&L ledger',
-    description: 'All 3 strategies\' realized P&L, win/loss, MFE/MAE for one calendar day. dayKey format: Date.prototype.toDateString(), e.g. "Wed Sep 03 2026". See PROTOCOL.md daily-loop step 1.',
+    description: 'Realized P&L, win/loss, MFE/MAE for one calendar day. dayKey format: Date.prototype.toDateString(), e.g. "Wed Sep 03 2026". See PROTOCOL.md daily-loop step 1.',
     inputSchema: { dayKey: z.string() },
   }, async ({ dayKey }) => {
     try { return textResult({ success: true, data: await fetchDailyLedger(dayKey) }); }
@@ -50,7 +49,7 @@ export function createBackendMcpServer() {
 
   server.registerTool('ledger_trades', {
     title: 'Raw ledger trades',
-    description: 'Raw trade docs, optionally filtered by system (Mongo db name: gap_continuation | mechanical_orb | gex_breakout), dayKey, or a closedFrom/closedTo range (bare YYYY-MM-DD or full ISO timestamps).',
+    description: 'Raw trade docs, optionally filtered by system (Mongo db name: gex_breakout), dayKey, or a closedFrom/closedTo range (bare YYYY-MM-DD or full ISO timestamps).',
     inputSchema: {
       system: z.string().optional(),
       dayKey: z.string().optional(),
@@ -60,48 +59,6 @@ export function createBackendMcpServer() {
     },
   }, async (args) => {
     try { return textResult({ success: true, data: await fetchLedgerTrades(args) }); }
-    catch (e) { return errorResult(e); }
-  });
-
-  server.registerTool('orb_backtest_run', {
-    title: 'Mechanical ORB backtest',
-    description: 'Runs the opening-range-breakout backtest engine. params carries the engine\'s own fields (direction, stopMode, entryCutoff, minDailyADX, etc — see orbBacktest.js\'s ORB_DEFAULTS); merge in mechanical-orb\'s live config values yourself, this tool does not read them for you.',
-    inputSchema: { symbol: z.string(), dateFrom: z.string(), dateTo: z.string(), params: z.record(z.any()).optional() },
-  }, async ({ symbol, dateFrom, dateTo, params }) => {
-    try { return textResult({ success: true, data: await runORBBacktest(symbol, dateFrom, dateTo, params || {}) }); }
-    catch (e) { return errorResult(e); }
-  });
-
-  server.registerTool('orb_walkforward_run', {
-    title: 'Mechanical ORB walk-forward validation',
-    description: 'Anchored walk-forward across numFolds (default 4). grid must have at least one non-empty array key even to test a single fixed config (pass e.g. {stopParam: [1.5]}) — see robustness.js\'s runWalkForward.',
-    inputSchema: {
-      symbol: z.string(), dateFrom: z.string(), dateTo: z.string(),
-      baseParams: z.record(z.any()).optional(), grid: z.record(z.any()).optional(), numFolds: z.number().optional(),
-    },
-  }, async ({ symbol, dateFrom, dateTo, baseParams, grid, numFolds }) => {
-    try { return textResult({ success: true, data: await runORBWalkForward(symbol, dateFrom, dateTo, baseParams || {}, grid || {}, numFolds || 4) }); }
-    catch (e) { return errorResult(e); }
-  });
-
-  server.registerTool('gapfill_backtest_run', {
-    title: 'Gap-continuation backtest',
-    description: 'Runs the gap-fill/continuation backtest engine (gapFillBacktest.js\'s GAP_FILL_DEFAULTS fields go in params). gap-continuation\'s live config uses direction: "CONTINUATION".',
-    inputSchema: { symbol: z.string(), dateFrom: z.string(), dateTo: z.string(), params: z.record(z.any()).optional() },
-  }, async ({ symbol, dateFrom, dateTo, params }) => {
-    try { return textResult({ success: true, data: await runGapFillBacktest(symbol, dateFrom, dateTo, params || {}) }); }
-    catch (e) { return errorResult(e); }
-  });
-
-  server.registerTool('gapfill_walkforward_run', {
-    title: 'Gap-continuation walk-forward validation',
-    description: 'Anchored walk-forward for the gap-fill engine. Same grid requirement as orb_walkforward_run.',
-    inputSchema: {
-      symbol: z.string(), dateFrom: z.string(), dateTo: z.string(),
-      baseParams: z.record(z.any()).optional(), grid: z.record(z.any()).optional(), numFolds: z.number().optional(),
-    },
-  }, async ({ symbol, dateFrom, dateTo, baseParams, grid, numFolds }) => {
-    try { return textResult({ success: true, data: await runGapFillWalkForward(symbol, dateFrom, dateTo, baseParams || {}, grid || {}, numFolds || 4) }); }
     catch (e) { return errorResult(e); }
   });
 
@@ -115,8 +72,8 @@ export function createBackendMcpServer() {
   });
 
   server.registerTool('reconciliation_run', {
-    title: 'Live-vs-backtest drift for one strategy',
-    description: 'Compares a strategy\'s actual recent live trades against a backtest\'s predicted stats over the same window. backtestStats is a backtest run\'s metrics.full or .oos (from *_backtest_run above).',
+    title: 'Live-vs-backtest drift',
+    description: 'Compares the strategy\'s actual recent live trades against a backtest\'s predicted stats over the same window. backtestStats is a backtest run\'s metrics.full or .oos (from orderflow_backtest_run above).',
     inputSchema: {
       system: z.string(), closedFrom: z.string(), closedTo: z.string(),
       backtestStats: z.record(z.any()), tolerances: z.record(z.any()).optional(),
@@ -132,7 +89,7 @@ export function createBackendMcpServer() {
 
   server.registerTool('reconciliation_shadow_days', {
     title: 'Build promotion-gate shadowDays (cumulative per day)',
-    description: 'Builds promotionGate\'s shadowDays array in one call. Each day\'s comparison is CUMULATIVE (day 1..N, not day N alone) — these strategies trade too infrequently for a single day to hit the 5-trade minimum to be comparable. See reconciliation.js\'s buildShadowDayReports.',
+    description: 'Builds promotionGate\'s shadowDays array in one call. Each day\'s comparison is CUMULATIVE (day 1..N, not day N alone) — this strategy trades too infrequently for a single day to hit the 5-trade minimum to be comparable. See reconciliation.js\'s buildShadowDayReports.',
     inputSchema: {
       system: z.string(), dateFrom: z.string(), dateTo: z.string(),
       backtestStats: z.record(z.any()), tolerances: z.record(z.any()).optional(),
@@ -161,7 +118,7 @@ export function createBackendMcpServer() {
 
   server.registerTool('promotion_gate_action', {
     title: 'Get the (unexecuted) promotion command',
-    description: 'Generates but never executes the exact command a human needs to run to flip a strategy live once its promotion gate has approved. strategy uses the directory-name form (gap-continuation | mechanical-orb | gex-breakout).',
+    description: 'Generates but never executes the exact command a human needs to run to flip a strategy live once its promotion gate has approved. strategy uses the directory-name form (gex-breakout).',
     inputSchema: { strategy: z.string(), gateResult: z.record(z.any()) },
   }, async ({ strategy, gateResult }) => {
     try { return textResult({ success: true, data: describePromotionAction(strategy, gateResult) }); }
@@ -170,7 +127,7 @@ export function createBackendMcpServer() {
 
   server.registerTool('promotion_gate_execute', {
     title: 'Actually flip a strategy live (real money)',
-    description: 'Executes the promotion action via the Heroku Platform API instead of just describing it — sets the strategy\'s EXECUTION_ENABLED-style config var to true if gateResult.approved. The credential for this lives only in this backend\'s own config, never in the agent-harness sandbox. This is a real, immediate, real-money action — only call it with a gateResult you actually got back from promotion_gate_evaluate for this exact strategy, never a fabricated or assumed one. strategy uses the directory-name form (gap-continuation | mechanical-orb | gex-breakout).',
+    description: 'Executes the promotion action via the Heroku Platform API instead of just describing it — sets the strategy\'s EXECUTION_ENABLED-style config var to true if gateResult.approved. The credential for this lives only in this backend\'s own config, never in the agent-harness sandbox. This is a real, immediate action — only call it with a gateResult you actually got back from promotion_gate_evaluate for this exact strategy, never a fabricated or assumed one. strategy uses the directory-name form (gex-breakout).',
     inputSchema: { strategy: z.string(), gateResult: z.record(z.any()) },
   }, async ({ strategy, gateResult }) => {
     try { return textResult({ success: true, data: await executePromotionAction(strategy, gateResult) }); }
@@ -202,6 +159,24 @@ export function createBackendMcpServer() {
     },
   }, async (args) => {
     try { return textResult({ success: true, data: await fetchAuditLog(args) }); }
+    catch (e) { return errorResult(e); }
+  });
+
+  server.registerTool('suggestions_list', {
+    title: 'Read user-submitted suggestions',
+    description: 'Free-text suggestions the user submitted through the dashboard\'s suggestion box, most recent first. Pass status: "new" to see only ones no prior run has considered yet (recommended at the start of the daily loop) — see PROTOCOL.md. Each result has an _id; pass that to suggestions_mark_read once you\'ve actually factored a suggestion into this run\'s decision.',
+    inputSchema: { status: z.string().optional(), limit: z.number().optional() },
+  }, async (args) => {
+    try { return textResult({ success: true, data: await fetchSuggestions(args) }); }
+    catch (e) { return errorResult(e); }
+  });
+
+  server.registerTool('suggestions_mark_read', {
+    title: 'Mark a user suggestion as considered',
+    description: 'Call once you\'ve actually read and factored the suggestion into this run\'s decision (a watch/proposal entry referencing it) — not before, and not just because it showed up in suggestions_list. Idempotent: safe to call again on one already marked read.',
+    inputSchema: { id: z.string() },
+  }, async ({ id }) => {
+    try { return textResult({ success: true, data: await markSuggestionRead(id) }); }
     catch (e) { return errorResult(e); }
   });
 

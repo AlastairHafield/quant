@@ -3,7 +3,7 @@
   "version": "1.0.0",
   "private": true,
   "type": "module",
-  "description": "Risk-enforcement code shared across gap-continuation, mechanical-orb, and gex-breakout — the one deliberate exception to this repo's otherwise self-contained-module-per-bot convention, since these bots share a real account and risk enforcement has to stay uniform across them.",
+  "description": "Risk-enforcement code used by gex-breakout — the one deliberate exception to this repo's otherwise self-contained-module-per-bot convention.",
   "scripts": {
     "test": "node --test"
   }

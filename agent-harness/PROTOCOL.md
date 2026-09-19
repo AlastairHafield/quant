@@ -7,30 +7,38 @@ before doing anything.
 
 ## What this system is
 
-Three live trading bots run on Heroku, each trading TopstepX futures
-(MES/ES) with real money on a funded Combine account:
+One bot runs on Heroku, trading TopstepX futures (MES/ES):
 
-- `gap-continuation/` — gap-continuation-direction strategy
-- `mechanical-orb/` — opening-range breakout strategy
 - `gex-breakout/` — the "Order Flow Bot" (OF), TopstepX order-flow / depth-
-  of-market based — see "Where the edge is" below, this is the priority
+  of-market based — see "Where the edge is" below. This is the sole focus
+  of this routine.
+
+(2026-09-19: the other two live bots that used to run here —
+`gap-continuation/` and `mechanical-orb/`, both trading the real funded
+Combine account — were decommissioned and their code removed. There is
+currently no strategy trading the real Combine; the Order Flow Bot trades
+only its own separate TopstepX practice account, which is not real money.)
 
 A shared backend (`backend/`) exposes backtesting, a unified performance
 ledger, and a promotion-gate pipeline, reachable through the `Quant` MCP
 connector. **You push approved code straight to both `origin` (GitHub) and
-`heroku`, and you flip strategies live yourself — both are real, immediate,
-real-money-relevant actions, not no-ops.** See rule 3 below for exactly how
-each one works and how they differ; never assume a code deploy also flips
+`heroku`, and you flip the strategy live yourself — both are real,
+immediate actions, not no-ops**, even though the Order Flow Bot's own
+account isn't real money today. See rule 3 below for exactly how each one
+works and how they differ; never assume a code deploy also flips
 `EXECUTION_ENABLED`, or vice versa.
 
-**The goal is $150/day average net profit across the real account.** Use
-this as context for how material a drift or an opportunity actually is —
-"we're well under $150/day and have been for weeks" is a much stronger
-reason to draft a thesis than a single red day, which is just noise. This is
-NOT a rigid daily pass/fail: day-to-day P&L on these strategies' trade
-frequency is noisy by nature (see `mcp__Quant__ledger_daily`'s own trade
-counts), so judge it over a rolling window (a couple of weeks of
-`ledger_daily` calls), not one day at a time.
+**The goal right now is a validated, robust practice-account track record
+for the Order Flow Bot** — positive expectancy that survives walk-forward,
+regime-robustness, and deflated-Sharpe scrutiny (see "Overfitting" below),
+not a dollar-per-day target (there's no real account to measure that
+against yet). Treat a stretch of weak or drifting practice-account
+performance as a reason to draft a thesis the same way you would live P&L;
+judge it over a rolling window (a couple of weeks of `ledger_daily` calls),
+not one day at a time. A future decision to trade this strategy on the real
+Combine is a separate, human-made call (see `gex-breakout/src/config.js`'s
+`orderFlowBot.executionEnabled` comment) — this routine's job is to make
+that decision easy to justify, not to make it itself.
 
 ## You are not one agent — you are a multi-model debate
 
@@ -48,8 +56,11 @@ override for each role:
 - **Second critic** (optional third agent, `model: "haiku"` — never `"fable"`,
   which is a paid-tier model the user has not opted into)
   — spin this one up for any proposal that would touch a strategy currently
-  live-trading the real account (not practice-mode-only). For a brand-new
-  experimental idea with no live exposure, one critic is enough.
+  live-trading the real account (not practice-mode-only). As of 2026-09-19
+  nothing this routine can flip live actually trades the real account (see
+  "What this system is" above), so this branch currently never triggers —
+  keep the check anyway in case that changes, and re-read this note rather
+  than assuming it's dead.
 
 **A proposal only proceeds if every critic approves it — one objection is
 enough to block it.** This is deliberately conservative: real money is
@@ -84,24 +95,20 @@ unrelated debate for the same strategy.
 ## Non-negotiable safety rules
 
 1. **Never edit, weaken, or route around** `shared/killSwitch.js`,
-   `shared/protectedLimits.js`, `shared/accountRisk.js`, or
-   `shared/hedgeGuard.js`. If a change you're considering would require
-   touching one of these, stop and log a `type: "error"` audit entry
-   explaining why instead of proceeding.
+   `shared/protectedLimits.js`, or `shared/accountRisk.js`. If a change
+   you're considering would require touching one of these, stop and log a
+   `type: "error"` audit entry explaining why instead of proceeding.
 2. **Absolutely no hedging — this account must never hold two
-   simultaneous, opposing-direction positions.** gap-continuation and
-   mechanical-orb already enforce this (they share the real Combine account
-   and refuse ANY second position, same-direction or not, via
-   `shared/hedgeGuard.js`'s `wouldOpenSimultaneousPosition` — see the
-   comment at each bot's `handleSignal` call site); gex-breakout's Order Flow
-   Bot enforces the same guarantee on its own account a different way
-   (`closeOnDirectionFlip` — close before reopening opposite-direction,
-   rather than refuse). A proposal touching entry-execution logic in ANY of
-   the three bots' `worker.js` must verify by hand that this protection
-   still holds before you draft it, and a critic must independently verify
-   the same thing before approving — this is exactly the kind of change
-   easy to break without noticing, since the existing tests would still pass
-   for the strategy's own logic while silently removing the guard around it.
+   simultaneous, opposing-direction positions.** gex-breakout's Order Flow
+   Bot enforces this on its own account via `closeOnDirectionFlip` (close
+   every existing tracked trade on a contract before opening a new,
+   conflicting-direction one, rather than simply refusing the new entry —
+   see `gex-breakout/src/worker.js`). A proposal touching entry-execution
+   logic in `worker.js` must verify by hand that this protection still holds
+   before you draft it, and a critic must independently verify the same
+   thing before approving — this is exactly the kind of change easy to break
+   without noticing, since the existing tests would still pass for the
+   strategy's own logic while silently removing the guard around it.
 3. **You now execute both halves of this pipeline yourself — deploying code
    and flipping a strategy live.** Two different mechanisms, use the right
    one:
@@ -125,22 +132,20 @@ unrelated debate for the same strategy.
 4. **Push straight to `main` on both `origin` and `heroku` once every critic
    approves — never before.** The unanimous-critic gate in "You are not one
    agent" IS the review step; there is no human-review branch stage anymore.
-   **If the strategy you touched is currently live-trading (rule 5: you
-   cannot know this for certain), this deploy changes its real-money
-   behavior on the next dyno restart — immediately, with no practice-mode
-   staging in between.** A code deploy does not by itself turn on a
-   currently-off strategy (that's `EXECUTION_ENABLED`, rule 3), but it CAN
-   change what an already-on one does. This makes the unanimous-critic gate
-   the only check standing between a change and real money for anything
-   touching entry-execution logic — which is exactly why
-   the second-critic requirement above for live-exposed strategies is not
-   optional. A rejected thesis (any critic objects) is never pushed
-   anywhere — only logged.
-5. **A strategy's `EXECUTION_ENABLED`-style flags live in Heroku config,
+   **If the strategy is currently live on its practice account (rule 5: you
+   cannot know this for certain), this deploy changes its behavior on the
+   next dyno restart — immediately, with no separate staging step in
+   between.** A code deploy does not by itself turn on a currently-off
+   strategy (that's `EXECUTION_ENABLED`, rule 3), but it CAN change what an
+   already-on one does. This makes the unanimous-critic gate the only check
+   standing between a change and the bot's live behavior for anything
+   touching entry-execution logic. A rejected thesis (any critic objects) is
+   never pushed anywhere — only logged.
+5. **The strategy's `EXECUTION_ENABLED`-style flags live in Heroku config,
    not in git** — you cannot see or change their current live values from
-   here. Never assume a strategy is (or isn't) currently live-trading based
-   on what you find in this repo; the promotion gate and the ledger's real
-   trade data are your only trustworthy signal.
+   here. Never assume the strategy is (or isn't) currently live-trading
+   based on what you find in this repo; the promotion gate and the ledger's
+   real trade data are your only trustworthy signal.
 6. **When genuinely uncertain, do nothing and say so.** Log a `"watch"`
    entry with your reasoning rather than forcing a proposal or a promotion
    recommendation nobody's confident in. A quiet day is a fine outcome.
@@ -212,12 +217,10 @@ shape the old HTTP routes used.
 
 | MCP tool | Purpose |
 |---|---|
-| `mcp__Quant__ledger_daily` | Unified daily P&L ledger (all 3 bots). Args: `{ dayKey: "Www Mon DD YYYY" }` |
+| `mcp__Quant__ledger_daily` | Unified daily P&L ledger. Args: `{ dayKey: "Www Mon DD YYYY" }` |
 | `mcp__Quant__ledger_trades` | Raw trades, optionally by `system`/`dayKey`/`closedFrom`/`closedTo` |
-| `mcp__Quant__orb_backtest_run` / `orb_walkforward_run` | Mechanical ORB backtest / walk-forward. Args: `{ symbol, dateFrom, dateTo, params?/baseParams?, grid?, numFolds? }` |
-| `mcp__Quant__gapfill_backtest_run` / `gapfill_walkforward_run` | Gap-continuation backtest / walk-forward, same arg shape |
 | `mcp__Quant__orderflow_backtest_run` | Order Flow Bot backtest (data-gated — see below). **`symbol` must be `"ES"`, not `"MES"`** — tick volume is captured against `INSTRUMENT_DATA` (the DOM/data feed), not `INSTRUMENT_TRADE` (what's actually traded); `"MES"` will always return the "no data" error even when real data exists |
-| `mcp__Quant__reconciliation_run` | Live-vs-backtest drift for one strategy. Args: `{ system, closedFrom, closedTo, backtestStats, tolerances? }` (`system` is the Mongo db name: `gex_breakout` \| `mechanical_orb` \| `gap_continuation`; `backtestStats` is a backtest run's `metrics.full` or `.oos`) |
+| `mcp__Quant__reconciliation_run` | Live-vs-backtest drift. Args: `{ system, closedFrom, closedTo, backtestStats, tolerances? }` (`system` is the Mongo db name: `gex_breakout`; `backtestStats` is a backtest run's `metrics.full` or `.oos`) |
 | `mcp__Quant__reconciliation_shadow_days` | Build promotion-gate-ready `shadowDays` (cumulative per day). Args: `{ system, dateFrom, dateTo, backtestStats, tolerances? }` |
 | `mcp__Quant__promotion_gate_evaluate` | Args: `{ walkForward, regime, deflated, shadowDays, criteria? }` |
 | `mcp__Quant__promotion_gate_action` | Get the (unexecuted) promotion command — for logging/display only now, see `promotion_gate_execute`. Args: `{ strategy, gateResult }` |
@@ -225,9 +228,8 @@ shape the old HTTP routes used.
 | `mcp__Quant__audit_log_write` | Auto-posts to Discord. Args: `{ type: "watch"\|"proposal"\|"grade"\|"promotion"\|"demotion"\|"error", role: "proposer"\|"critic-opus"\|..., strategy, summary, details?, debateId? }` — omit `debateId` on a `proposal` entry to get one generated; required on every entry responding to that proposal (see "Thread every response" above) |
 | `mcp__Quant__audit_log_read` | Args: `{ strategy?, type?, debateId?, limit? }` |
 
-`system` (Mongo db name) vs the strategy directory name: `gap-continuation`
-↔ `gap_continuation`, `mechanical-orb` ↔ `mechanical_orb`, `gex-breakout`
-↔ `gex_breakout`. The promotion gate's `strategy` argument uses the
+`system` (Mongo db name) vs the strategy directory name: `gex-breakout` ↔
+`gex_breakout`. The promotion gate's `strategy` argument uses the
 directory-name form (see `backend/src/engine/promotionAction.js`'s mapping).
 
 **`backend/src/engine/orderFlowBacktest.js`** backtests the Order Flow Bot by
@@ -288,23 +290,36 @@ numbers mean.
    `origin/main`, that's real signal worth a `type: "error"` entry — just
    never conclude that from an unfetched ref.
 
-For each of the three strategies, the **proposer** agent:
+0.5. **Check for user suggestions.** Call `mcp__Quant__suggestions_list` with
+   `{ status: "new" }` — this is free text the user typed into the
+   dashboard's suggestion box specifically to steer this run (e.g. "look at
+   whether the absorption trigger is too loose," "check today's drift before
+   proposing anything new"). Treat each one as a strong hint about where to
+   spend this run's attention, not a rigid instruction — you still own the
+   judgment call on whether it leads anywhere. Fold it into step 1-3's
+   reasoning and mention it explicitly in whatever audit entry it informed.
+   Call `mcp__Quant__suggestions_mark_read` for each one you actually
+   factored in — not for one you read and decided doesn't apply; leave that
+   one `"new"` so a future run (maybe with more relevant data) can
+   reconsider it, but say in your `"watch"` entry that you saw and set it
+   aside, and why.
+
+The **proposer** agent:
 
 1. **Pulls recent performance.** `mcp__Quant__ledger_daily` for each of the
    last ~10 trading days (dayKey format: `Date.prototype.toDateString()`,
    e.g. `"Wed Sep 02 2026"`). Fewer than 5 closed trades in that window
    usually isn't enough signal to act on.
 
-2. **Reconciles against the current backtest** (where a backtest engine
-   exists — see the gex-breakout note above). Read the strategy's actual
-   live config (`gap-continuation/src/config.js`, etc.), run the matching
-   backtest over a matching window, call `mcp__Quant__reconciliation_run`.
-   Drift found is itself worth a `"watch"` entry even with no fix in hand.
+2. **Reconciles against the current backtest.** Read the live config
+   (`gex-breakout/src/config.js`), run the matching backtest over a matching
+   window, call `mcp__Quant__reconciliation_run`. Drift found is itself
+   worth a `"watch"` entry even with no fix in hand.
 
 3. **Decides: watch, or draft a thesis.** A thesis needs a concrete,
    specific reason — drift found, a DOM/order-flow signal worth testing, a
    parameter stale relative to recent regime. Log a `"watch"` entry either
-   way before moving to the next strategy.
+   way.
 
 4. **If drafting a thesis:** implement it locally (don't push yet). Run the
    relevant walk-forward/regime-robustness/deflated-Sharpe checks. Check
@@ -363,20 +378,19 @@ For each of the three strategies, the **proposer** agent:
    Heroku rejected it — check this field, a non-throwing failure is not a
    success). If `executed: false` with an error, do not retry silently in the
    same run — log it and stop for this strategy.
-   **Why this isn't just N calls to `reconciliation_run`:** these
-   strategies trade a handful of times a month — comparing any ONE day's own
-   trades against the backtest would almost never hit the 5-trade minimum to
-   even be "comparable," silently defeating the drift check for every
-   low-frequency strategy. `reconciliation_shadow_days` instead makes each
-   day's comparison CUMULATIVE (day N vs. everything from day 1 through N),
-   so drift becomes detectable as the shadow period accumulates trades. See
+   **Why this isn't just N calls to `reconciliation_run`:** this strategy
+   trades a handful of times a month — comparing any ONE day's own trades
+   against the backtest would almost never hit the 5-trade minimum to even
+   be "comparable," silently defeating the drift check for a low-frequency
+   strategy. `reconciliation_shadow_days` instead makes each day's
+   comparison CUMULATIVE (day N vs. everything from day 1 through N), so
+   drift becomes detectable as the shadow period accumulates trades. See
    `backend/src/engine/reconciliation.js`'s `buildShadowDayReports` if this
-   needs adjusting for a new strategy's trade frequency.
+   needs adjusting for a change in trade frequency.
 
 ## End of run
 
-Write one final `"watch"`-type audit entry per strategy even if no other
-action was taken, summarizing what was checked and why. The next day's run
-(and the human reading Discord/the audit log) should be able to reconstruct
-the full reasoning without needing this run's memory — because it won't
-have any.
+Write one final `"watch"`-type audit entry even if no other action was
+taken, summarizing what was checked and why. The next day's run (and the
+human reading Discord/the audit log) should be able to reconstruct the full
+reasoning without needing this run's memory — because it won't have any.
