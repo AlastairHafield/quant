@@ -102,16 +102,39 @@ const BARE_DATE = /^\d{4}-\d{2}-\d{2}$/;
 export function widenClosedFrom(d) { return BARE_DATE.test(d) ? `${d}T00:00:00.000Z` : d; }
 export function widenClosedTo(d) { return BARE_DATE.test(d) ? `${d}T23:59:59.999Z` : d; }
 
-export async function fetchLedgerTrades({ dayKey, closedFrom, closedTo, system, limit = 500 } = {}) {
-  const c = await getClient();
-  const dbNames = system ? [system] : STRATEGY_DBS;
+// Pure query-object builder, split out so the filter logic is testable
+// without a live Mongo connection (same reasoning as widenClosedFrom/To
+// above and aggregateDailyLedger below).
+//
+// `strategy` filters on each trade doc's own `strategy` field — distinct
+// from `system` (the Mongo db name / which bot owns the ledger) and from
+// `accountRole` (fetchTrades' practice-vs-real split above). gex-breakout's
+// ledger in particular tags three different categories under `strategy`:
+// "OF" (the Order Flow Bot's own real signal trades), "reconciled"
+// (untracked fills gex-breakout's polling picks up on the shared real
+// Combine account — mostly other bots'/manual activity, NOT OF signals),
+// and "B" (a retired legacy strategy, dead since Jul 30). Pooling all three
+// together — which is what every caller did before this filter existed —
+// silently conflates them; a reconciliation of the OF backtest (which only
+// ever models "OF" trades) against unfiltered live trades compares it
+// against P&L dominated by unrelated "reconciled" fills. Optional and
+// additive: omitting it preserves every existing caller's behavior exactly.
+export function buildLedgerQuery({ dayKey, closedFrom, closedTo, strategy } = {}) {
   const query = {};
   if (dayKey) query.dayKey = dayKey;
+  if (strategy) query.strategy = strategy;
   if (closedFrom || closedTo) {
     query.closedAt = {};
     if (closedFrom) query.closedAt.$gte = widenClosedFrom(closedFrom);
     if (closedTo) query.closedAt.$lte = widenClosedTo(closedTo);
   }
+  return query;
+}
+
+export async function fetchLedgerTrades({ dayKey, closedFrom, closedTo, system, strategy, limit = 500 } = {}) {
+  const c = await getClient();
+  const dbNames = system ? [system] : STRATEGY_DBS;
+  const query = buildLedgerQuery({ dayKey, closedFrom, closedTo, strategy });
   const perDb = await Promise.all(dbNames.map(async (dbName) => {
     const docs = await c.db(dbName).collection('trades').find(query).sort({ openedAt: -1 }).limit(limit).toArray();
     return docs.map((d) => ({ ...d, _dbName: dbName }));

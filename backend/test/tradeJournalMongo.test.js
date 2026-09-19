@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { aggregateDailyLedger, widenClosedFrom, widenClosedTo } from '../src/data/tradeJournalMongo.js';
+import { aggregateDailyLedger, widenClosedFrom, widenClosedTo, buildLedgerQuery } from '../src/data/tradeJournalMongo.js';
 
 test('aggregateDailyLedger: excludes open trades and trades with no realizedPnl yet', () => {
   const trades = [
@@ -69,4 +69,35 @@ test('widenClosedTo: a trade closing later on the bare-date boundary day is now 
   const closedAt = '2026-09-02T14:30:00.000Z';
   assert.ok(closedAt <= widenClosedTo('2026-09-02'));
   assert.ok(closedAt > '2026-09-02'); // confirms the ORIGINAL (unwidened) comparison would have wrongly excluded it
+});
+
+// ─── buildLedgerQuery: the strategy-filter fix ───────────────────────────
+// gex-breakout's ledger tags three distinct categories under `strategy`:
+// "OF" (the Order Flow Bot's own real signal trades), "reconciled"
+// (untracked shared-Combine-account fills that are NOT OF signals), and "B"
+// (a retired legacy strategy). Before this filter existed, every caller
+// (including reconciliation_run) pooled all three together, comparing an
+// OF-only backtest against live P&L dominated by unrelated activity.
+
+test('buildLedgerQuery: no filters produces an empty query (existing behavior unchanged)', () => {
+  assert.deepEqual(buildLedgerQuery(), {});
+  assert.deepEqual(buildLedgerQuery({}), {});
+});
+
+test('buildLedgerQuery: strategy is omitted from the query when not passed', () => {
+  const query = buildLedgerQuery({ closedFrom: '2026-09-01', closedTo: '2026-09-08' });
+  assert.equal('strategy' in query, false);
+});
+
+test('buildLedgerQuery: strategy is added to the query when passed, alongside existing filters', () => {
+  const query = buildLedgerQuery({ dayKey: 'Wed Sep 03 2026', strategy: 'OF' });
+  assert.equal(query.strategy, 'OF');
+  assert.equal(query.dayKey, 'Wed Sep 03 2026');
+});
+
+test('buildLedgerQuery: strategy combines correctly with a closedFrom/closedTo range', () => {
+  const query = buildLedgerQuery({ closedFrom: '2026-09-01', closedTo: '2026-09-08', strategy: 'OF' });
+  assert.equal(query.strategy, 'OF');
+  assert.equal(query.closedAt.$gte, '2026-09-01T00:00:00.000Z');
+  assert.equal(query.closedAt.$lte, '2026-09-08T23:59:59.999Z');
 });
