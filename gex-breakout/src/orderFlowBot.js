@@ -24,6 +24,43 @@ export function computeZoneStop({ zone, entryPrice, direction, stopCapPts, trigg
   return { valid: distance <= stopCapPts, distance, stopPrice };
 }
 
+// failed_auction's OWN stop placement — deliberately NOT computeZoneStop's
+// edge-based formula. detectFailedAuction (volumeProfile.js) only fires
+// AFTER price has already probed PAST the value-area edge by construction
+// (windowHigh > valueArea.high, or windowLow < valueArea.low, within the
+// trailing probeLookbackBars) — the trigger bar is just the close coming
+// back inside. computeZoneStop anchors the stop at that edge + a single
+// triggerBufferPts (1pt/4 ticks on MES): whenever the probe's own extreme
+// (probePrice) sits meaningfully beyond the edge — which is common, since
+// "how far it probed" is unrelated to "how close the reverting close ended
+// up to the edge" — that stop lands INSIDE the very price range the probe
+// just traded through seconds/minutes earlier. A normal retest of that same
+// swing (not a new adverse move, just the tape revisiting where it already
+// was) then stops the trade out immediately, before the reversion thesis
+// gets any room to develop. Real evidence: live OF trades Sep 3-21 2026,
+// 10 of 23 (43%) closed with mfe==0 AND mae==0 (stopped out before even one
+// bar registered favorable OR adverse excursion); the Sep 2026 backtest
+// window's byTrigger breakdown showed failed_auction at 12.5% win rate
+// (n=16) vs absorption's 75% (n=4) — absorption's own stop is edge-based
+// too, but detectAbsorption's `stalledPrice` condition (advance <
+// maxAdvancePts) means price hasn't actually traded past the edge yet when
+// that trade is taken, so this same failure mode doesn't apply to it.
+// Anchoring beyond the actual probe extreme instead means a normal retest
+// of the just-completed swing no longer clips the stop by itself — the
+// trade now needs a genuine NEW push past where price already proved it
+// would go, not just a return visit, to be stopped out. Falls back to
+// computeZoneStop's edge-based placement if no probePrice is available
+// (shouldn't happen for a real failed_auction trigger — kept only so this
+// function stays total rather than throwing on an unexpected shape).
+export function computeFailedAuctionStop({ zone, entryPrice, direction, probePrice, stopCapPts, triggerBufferPts }) {
+  if (probePrice == null) {
+    return computeZoneStop({ zone, entryPrice, direction, stopCapPts, triggerBufferPts });
+  }
+  const stopPrice = direction === "long" ? probePrice - triggerBufferPts : probePrice + triggerBufferPts;
+  const distance = Math.abs(entryPrice - stopPrice);
+  return { valid: distance <= stopCapPts, distance, stopPrice };
+}
+
 export function runOrderFlowChecks({ nowET, config }) {
   if (!timeCheck(nowET, config.entryCutoffET)) {
     return { pass: false, vetoReason: "past_trading_cutoff" };
@@ -136,7 +173,12 @@ export function evaluateOrderFlowBot(ctx) {
   if (regimeInfo.baseRegime === "RANGE" && valueArea) {
     const failed = detectFailedAuction(bars, index, valueArea, config.orderFlowBot.volumeProfile);
     if (failed) {
-      trigger = { direction: failed.direction, trigger: "failed_auction", entryPrice: bar.close };
+      trigger = {
+        direction: failed.direction,
+        trigger: "failed_auction",
+        entryPrice: bar.close,
+        probePrice: failed.probePrice,
+      };
       zone = { side: null, low: valueArea.low, high: valueArea.high };
     }
   }
@@ -215,13 +257,26 @@ export function evaluateOrderFlowBot(ctx) {
     return { strategy: "OF", direction: trigger.direction, zone, zoneKey, veto: "wall_too_close" };
   }
 
-  const stop = computeZoneStop({
-    zone,
-    entryPrice: trigger.entryPrice,
-    direction: trigger.direction,
-    stopCapPts: config.tradeManagement.stopCapPts,
-    triggerBufferPts: config.orderFlowBot.triggerBufferPts,
-  });
+  // failed_auction gets its own probe-extreme-anchored stop (see
+  // computeFailedAuctionStop's header comment) — every other trigger keeps
+  // computeZoneStop's edge-based placement unchanged.
+  const stop =
+    trigger.trigger === "failed_auction"
+      ? computeFailedAuctionStop({
+          zone,
+          entryPrice: trigger.entryPrice,
+          direction: trigger.direction,
+          probePrice: trigger.probePrice,
+          stopCapPts: config.tradeManagement.stopCapPts,
+          triggerBufferPts: config.orderFlowBot.triggerBufferPts,
+        })
+      : computeZoneStop({
+          zone,
+          entryPrice: trigger.entryPrice,
+          direction: trigger.direction,
+          stopCapPts: config.tradeManagement.stopCapPts,
+          triggerBufferPts: config.orderFlowBot.triggerBufferPts,
+        });
   if (!stop.valid) {
     return { strategy: "OF", direction: trigger.direction, zone, zoneKey, veto: "stop_exceeds_cap" };
   }

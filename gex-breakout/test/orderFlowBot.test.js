@@ -6,6 +6,7 @@ import {
   isZoneOnCooldown,
   buildActiveZones,
   computeZoneStop,
+  computeFailedAuctionStop,
   evaluateZoneAbsorption,
   nearestZoneOrSynthetic,
   evaluateOrderFlowBot,
@@ -169,6 +170,10 @@ test("evaluateOrderFlowBot: RANGE failed-auction produces a full contrarian sign
     config,
     dayState: freshDayState(),
   });
+  // Stop is anchored beyond the actual probe extreme (107, the window high
+  // that pushed past valueArea.high) + triggerBufferPts, NOT the old
+  // edge-based 105 + 1 = 106 — see computeFailedAuctionStop's header
+  // comment for why the edge-anchored version is a diagnosable live bug.
   assert.deepEqual(result, {
     strategy: "OF",
     direction: "short",
@@ -177,8 +182,8 @@ test("evaluateOrderFlowBot: RANGE failed-auction produces a full contrarian sign
     zoneKey: "VA:100.00-105.00",
     level: { type: "FAILED_AUCTION", price: 104 },
     entryPrice: 104,
-    stopPrice: 106,
-    stopDistance: 2,
+    stopPrice: 108,
+    stopDistance: 4,
     targetPrice: 100,
     targetMode: "contrarian_value_area",
     sizeMultiplier: 1,
@@ -186,6 +191,60 @@ test("evaluateOrderFlowBot: RANGE failed-auction produces a full contrarian sign
     regime: "RANGE",
     veto: null,
   });
+});
+
+test("computeFailedAuctionStop: short stop sits triggerBufferPts beyond the actual probe extreme, not just the zone edge", () => {
+  const zone = { low: 100, high: 105 };
+  // Old edge-based computeZoneStop would put this at 105 + 1 = 106 — the
+  // probe pushed to 109, well past the edge, so this anchors there instead.
+  const stop = computeFailedAuctionStop({
+    zone,
+    entryPrice: 104,
+    direction: "short",
+    probePrice: 109,
+    stopCapPts: 12,
+    triggerBufferPts: 1,
+  });
+  assert.deepEqual(stop, { valid: true, distance: 6, stopPrice: 110 });
+});
+
+test("computeFailedAuctionStop: long stop sits triggerBufferPts beyond the actual probe extreme", () => {
+  const zone = { low: 100, high: 105 };
+  const stop = computeFailedAuctionStop({
+    zone,
+    entryPrice: 101,
+    direction: "long",
+    probePrice: 96,
+    stopCapPts: 12,
+    triggerBufferPts: 1,
+  });
+  assert.deepEqual(stop, { valid: true, distance: 6, stopPrice: 95 });
+});
+
+test("computeFailedAuctionStop: invalid once total distance exceeds stopCapPts", () => {
+  const zone = { low: 100, high: 105 };
+  const stop = computeFailedAuctionStop({
+    zone,
+    entryPrice: 104,
+    direction: "short",
+    probePrice: 120,
+    stopCapPts: 12,
+    triggerBufferPts: 1,
+  });
+  assert.equal(stop.valid, false);
+});
+
+test("computeFailedAuctionStop: falls back to edge-based computeZoneStop when probePrice is missing", () => {
+  const zone = { low: 100, high: 105 };
+  const stop = computeFailedAuctionStop({
+    zone,
+    entryPrice: 104,
+    direction: "short",
+    probePrice: null,
+    stopCapPts: 12,
+    triggerBufferPts: 1,
+  });
+  assert.deepEqual(stop, { valid: true, distance: 2, stopPrice: 106 });
 });
 
 test("evaluateOrderFlowBot: TREND absorption on a footprint zone produces a trend-day placeholder-target signal", () => {
