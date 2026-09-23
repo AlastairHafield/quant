@@ -114,9 +114,20 @@ unrelated debate for the same strategy.
    one:
    - **Code deploy**: `HEROKU_API_KEY` env var is a git credential for
      `git.heroku.com` — run `git push heroku main` right after
-     `git push origin main`. If it isn't set for some run, that's a real
-     gap, not a signal to work around it: log a `type: "error"` audit entry
-     and push to `origin` only for that run.
+     `git push origin main`. A fresh clone has no `heroku` remote, so add it
+     first (the app is `quantapp`, same name
+     `backend/src/engine/promotionAction.js` uses). This credential helper
+     reads the key only at push time, so it never gets printed or written
+     to disk:
+     ```
+     git remote get-url heroku 2>/dev/null || git remote add heroku https://git.heroku.com/quantapp.git
+     git config credential.https://git.heroku.com.helper '!f() { echo username=heroku; echo "password=$HEROKU_API_KEY"; }; f'
+     GIT_TERMINAL_PROMPT=0 git push heroku main
+     ```
+     Never echo, `cat`, or otherwise print `HEROKU_API_KEY` to check it.
+     A failed push tells you it's missing or wrong. If the push fails for
+     that reason, that's a real gap, not a signal to work around it: log a
+     `type: "error"` audit entry and push to `origin` only for that run.
    - **Flipping `EXECUTION_ENABLED`** (putting real money behind a
      strategy): call `mcp__Quant__promotion_gate_execute` — it PATCHes the
      Heroku config var server-side via a credential that lives only in the
