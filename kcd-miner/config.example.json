@@ -1,0 +1,21 @@
+{
+  "window_title": "Kingdom Come",
+  "monitor": 1,
+  "templates_dir": "templates",
+  "templates": {
+    "prompt": {"file": "prompt.png", "threshold": 0.8, "region": [0.3, 0.45, 0.7, 0.9]},
+    "node": {"file": "node.png", "threshold": 0.65, "scales": [0.5, 0.7, 0.85, 1.0, 1.2]},
+    "inventory_full": {"file": "inventory_full.png", "threshold": 0.85}
+  },
+  "abort_on": ["inventory_full"],
+  "keys": {"forward": "w"},
+  "mine_action": {"type": "hold_key", "key": "e", "hold_s": 4.0, "max_cycles": 10, "after_s": 0.6},
+  "scan": {"enabled": true, "step_px": 250, "steps_per_rotation": 16, "settle_s": 0.35},
+  "approach": {"center_tolerance_px": 40, "turn_gain": 0.5, "step_s": 0.4, "timeout_s": 20},
+  "respawn_wait_s": 60,
+  "jitter": 0.15,
+  "max_runtime_min": 120,
+  "breaks": {"every_min": [25, 45], "duration_min": [2, 6]},
+  "hotkeys": {"pause": "f8", "quit": "f9"},
+  "require_focus": true
+}

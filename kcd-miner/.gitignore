@@ -1,0 +1,6 @@
+config.json
+captures/
+templates/*
+!templates/.gitkeep
+__pycache__/
+.pytest_cache/
